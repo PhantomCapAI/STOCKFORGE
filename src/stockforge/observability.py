@@ -92,12 +92,14 @@ def build_claim_record(
     ok: bool,
     detail: str,
     at: float,
+    wallet_id: str = "main",
 ) -> dict[str, Any]:
     """Secret-free record of a fee-claim attempt. `treasury` is the public fee
     recipient — never a private key. `mode` is cli / build-claim / dry-run."""
     return {
         "event": "fee_claim",
         "timestamp": _iso(at),
+        "wallet_id": wallet_id,
         "treasury": treasury,
         "token_count": len(token_addresses),
         "tokens": token_addresses[:50],

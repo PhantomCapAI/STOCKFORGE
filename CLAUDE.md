@@ -155,9 +155,24 @@ do not build. Per-wallet REST launching uses each wallet's `api_key`.
 lets a real X/content agent plug in later. The "not affiliated" disclaimer is
 always included. `STOCKFORGE_PROMO_ENABLED` toggles it.
 
+**Fee sweeps are wallet-pool-aware.** `_fee_sweep` reads claimable for every
+launched token **against the address it actually routes to** (each wallet's
+`fee_recipient`), groups by recipient, and claims per group: a wallet with its
+own `private_key` claims via the CLI with that key; otherwise unsigned txs are
+built addressed to that recipient. Each claim is attributed (`wallet_id`) in the
+`claim_record`. `STOCKFORGE_FEE_CLAIM_MIN_WETH` gates per-group dust.
+
+**Stock-pair confirmation.** Pairing is UNVERIFIED until a human checks a real
+launch. After confirming the pool is quoted in the stock on Bankr, the operator
+marks it: `stockforge confirm-pair <token>` or `/confirmpair <token>` (persisted
+in `pair_confirmations`). `stockforge treasury` lists confirmed vs pending-
+verification stock-paired tokens.
+
 **Observability.** Every launch → secret-free `launch_record`; every claim →
 secret-free `claim_record` (both JSON to stdout + persisted: `launches`/`claims`
-tables). Per-tick heartbeat logs budget remaining, circuit state, and mode.
+tables). `stockforge treasury` / `/treasury` show claimed WETH, per-wallet
+attribution, top producing tokens, pair-verification status, and recent claims.
+Per-tick heartbeat logs budget remaining, circuit state, and mode.
 
 **Fees → compute (self-funding loop).** `FORGE_LLM_PROVIDER=bankr` points the
 concept forge at the **Bankr LLM Gateway** (`llm.bankr.bot`, verified,

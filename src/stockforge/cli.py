@@ -7,6 +7,7 @@
   stockforge selfcheck [NVDA]    # run a full DRY-RUN pipeline end to end
   stockforge launch NVDA         # one controlled launch (respects dry-run + approval)
   stockforge fees <0xtoken>      # read fees for a token (public, no auth)
+  stockforge confirm-pair <tok>  # mark a stock-pairing manually verified
   stockforge treasury            # extracted fees + fees->compute funding status
   stockforge doctor              # environment / readiness check (fail-closed)
   stockforge preflight           # pre-live readiness checklist (fail-closed)
@@ -67,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_fees = sub.add_parser("fees", help="read fees for a token address")
     p_fees.add_argument("token")
+    p_cp = sub.add_parser("confirm-pair", help="mark a launch's stock-pairing manually verified")
+    p_cp.add_argument("token")
+    p_cp.add_argument("--note", default="")
 
     args = parser.parse_args(argv)
     cmd = args.cmd or "run"
@@ -90,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_selfcheck(args.ticker, args.chain, args.live_approval))
         if cmd == "fees":
             return asyncio.run(_fees(args.token))
+        if cmd == "confirm-pair":
+            return asyncio.run(_confirm_pair(args.token, args.note))
     except KeyboardInterrupt:
         log.info("interrupted")
         return 130
@@ -172,7 +178,14 @@ async def _treasury() -> int:
     summary = await store.claim_summary()
     by_wallet = await store.launch_counts_by_wallet()
     per_token = await store.per_token_latest_fees()
+    recent = await store.recent_claims(5)
+    token_map = await store.token_recipients()
+    confirmed = await store.pair_confirmed_map()
     await store.close()
+
+    # Headline: how much has actually been pulled.
+    print(f"  💰 CLAIMED (recorded)   : {summary['weth_claimed_recorded']:.6f} WETH "
+          f"across {summary['claim_successes']}/{summary['claim_attempts']} claims")
 
     # Wallet pool (one honest operation) + per-wallet launch attribution.
     pool = WalletPool.from_settings(settings)
@@ -180,17 +193,29 @@ async def _treasury() -> int:
     for w in pool.redacted():
         print(f"  {w['id']:12} fees->{w['fee_recipient']}  launched={by_wallet.get(w['id'], 0)}")
 
-    print("  -- local claim audit trail --")
-    print(f"  claim attempts   : {summary['claim_attempts']}  successes={summary['claim_successes']}")
-    print(f"  WETH claimed (recorded): {summary['weth_claimed_recorded']:.6f}")
-    if summary["last_claim"]:
-        lc = summary["last_claim"]
-        print(f"  last claim       : {lc['at']} [{lc['mode']}] ok={lc['ok']} {lc['weth']:.6f} WETH")
-
+    # Producing tokens: highest claimable first (where the fees actually are).
     if per_token:
-        print("  -- per-token fees (latest seen) --")
-        for t in per_token[:10]:
-            print(f"  {t['token'][:14]}… claimable={t['claimable_weth']} claimed={t['claimed_weth']}")
+        producing = sorted(per_token, key=lambda t: t["claimable_weth"], reverse=True)
+        print("  -- top producing tokens (by claimable) --")
+        for t in producing[:8]:
+            mark = "✅pair" if confirmed.get(t["token"], {}).get("confirmed") else "     "
+            print(f"  {mark} {t['token'][:16]}… claimable={t['claimable_weth']} claimed={t['claimed_weth']}")
+
+    # Stock-pair verification: which launched tokens still need manual confirming.
+    paired = {tok: m for tok, m in token_map.items() if m.get("ticker")}
+    if paired:
+        unconfirmed = [t for t in paired if not confirmed.get(t, {}).get("confirmed")]
+        print("  -- stock-pair verification --")
+        print(f"  confirmed: {sum(1 for v in confirmed.values() if v['confirmed'])}  "
+              f"pending: {len(unconfirmed)}")
+        for t in unconfirmed[:5]:
+            print(f"    ⏳ {t[:16]}… ({paired[t]['ticker']}) — confirm: stockforge confirm-pair {t}")
+
+    if recent:
+        print("  -- recent extraction activity --")
+        for r in recent:
+            print(f"  {r.get('timestamp','')[:19]} [{r.get('wallet_id','?')}/{r.get('mode','?')}] "
+                  f"{r.get('claimable_weth',0):.6f} WETH ok={r.get('ok')}")
 
     if settings.treasury:
         try:
@@ -212,6 +237,24 @@ async def _treasury() -> int:
     print(f"  loop        : {cf['loop']}")
     print(f"  llm_gateway : {cf['llm_gateway']}")
     print(f"  top up      : {cf['commands']['top_up']}  |  auto: {cf['commands']['auto_top_up']}")
+    return 0
+
+
+async def _confirm_pair(token: str, note: str) -> int:
+    """Operator confirms a launch's pool is really quoted in the stock — closes the
+    UNVERIFIED gap for that token after a manual check on Bankr."""
+    from .db import Store
+
+    _quiet_logs()
+    settings = get_settings()
+    store = Store(settings.db_path)
+    await store.connect()
+    tmap = await store.token_recipients()
+    ticker = tmap.get(token, {}).get("ticker", "")
+    await store.confirm_pair(token, ticker, note)
+    await store.close()
+    print(f"✅ stock-pair confirmed for {token} ({ticker or 'unknown ticker'})"
+          + (f" — {note}" if note else ""))
     return 0
 
 

@@ -377,43 +377,69 @@ class Orchestrator:
         return result
 
     # ---- fees ----------------------------------------------------------------
+    def _wallet_for_recipient(self, recipient: str) -> Wallet | None:
+        return next((w for w in self.pool.wallets if w.fee_recipient == recipient), None)
+
     async def _fee_sweep(self) -> None:
+        """Read claimable fees for every launched token AGAINST THE ADDRESS IT
+        ROUTES TO (each wallet's fee_recipient), grouped per recipient. Multi-
+        wallet aware; falls back to the treasury for tokens with no recorded
+        recipient."""
         treasury = self.settings.treasury
-        if not treasury:
+        token_map = await self.store.token_recipients()
+        if not token_map:
             return
-        addresses = await self.store.confirmed_token_addresses()
-        if not addresses:
-            return
-        claimable_total = 0.0
+
+        # recipient -> {"tokens": [...], "claimable": float}
+        groups: dict[str, dict] = {}
+        total = 0.0
         async with FeeReader(self.settings.bankr_api_base) as reader:
-            for addr in addresses:
-                snap = await reader.claimable_for(addr, treasury)
-                snap.beneficiary = treasury
+            for token, meta in token_map.items():
+                recipient = meta.get("recipient") or treasury
+                if not recipient:
+                    continue
+                snap = await reader.claimable_for(token, recipient)
+                snap.beneficiary = recipient
                 await self.store.save_fee_snapshot(snap)
-                claimable_total += snap.claimable_weth
+                g = groups.setdefault(recipient, {"tokens": [], "claimable": 0.0})
+                g["tokens"].append(token)
+                g["claimable"] += snap.claimable_weth
+                total += snap.claimable_weth
+
+        per_recipient = ", ".join(
+            f"{self._recipient_label(r)}={g['claimable']:.6f}" for r, g in groups.items()
+        )
         log.info(
-            "fee sweep: %d tokens, %.6f WETH claimable -> treasury %s",
-            len(addresses),
-            claimable_total,
-            treasury,
+            "fee sweep: %d tokens across %d recipient(s), %.6f WETH claimable [%s]",
+            len(token_map),
+            len(groups),
+            total,
+            per_recipient or "none",
         )
         if not self.settings.auto_claim:
             log.info("auto_claim off — monitoring only, not claiming")
             return
-        # Only escalate to a claim when there's meaningful value (avoid dust/gas).
-        if claimable_total >= self.settings.fee_claim_min_weth:
-            await self._maybe_claim(addresses, claimable_total)
+        # Claim per recipient group whose claimable clears the dust threshold.
+        for recipient, g in groups.items():
+            if g["claimable"] >= self.settings.fee_claim_min_weth:
+                await self._maybe_claim(recipient, g["tokens"], g["claimable"])
 
-    async def _maybe_claim(self, addresses: list[str], total_weth: float) -> None:
-        treasury = self.settings.treasury
+    def _recipient_label(self, recipient: str) -> str:
+        w = self._wallet_for_recipient(recipient)
+        return f"{w.id}" if w else (recipient[:10] + "…" if recipient else "?")
+
+    async def _maybe_claim(self, recipient: str, addresses: list[str], total_weth: float) -> None:
+        wallet = self._wallet_for_recipient(recipient)
+        wlabel = wallet.id if wallet else self._recipient_label(recipient)
         summary = (
-            f"CLAIM fees: {len(addresses)} tokens, ~{total_weth:.6f} WETH -> {treasury}"
+            f"CLAIM fees [{wlabel}]: {len(addresses)} tokens, ~{total_weth:.6f} WETH -> {recipient}"
         )
         approval_status = "not_required (dry-run)" if self.settings.dry_run else "auto (approval off)"
 
         if self.settings.dry_run:
             await self.tg.send(f"🧪 [dry-run] would claim — {summary}")
-            await self._record_claim(addresses, total_weth, approval_status, "dry-run", True, "suppressed (dry-run)")
+            await self._record_claim(recipient, wlabel, addresses, total_weth, approval_status,
+                                     "dry-run", True, "suppressed (dry-run)")
             return
 
         if self.settings.require_approval:
@@ -425,24 +451,29 @@ class Orchestrator:
             await self.store.save_approval(approval)
             approval_status = approval.status
             if not ok:
-                await self._record_claim(addresses, total_weth, approval_status, "denied", False, "operator denied")
+                await self._record_claim(recipient, wlabel, addresses, total_weth, approval_status,
+                                         "denied", False, "operator denied")
                 return
 
-        # Prefer a real wallet claim (broadcasts to treasury) when a hot key is
-        # present; otherwise build UNSIGNED txs for the operator to sign.
-        if self.settings.bankr_private_key:
-            outcome = await self.claimer.claim_wallet_cli()
+        # Prefer a real wallet claim using THIS wallet's hot key; otherwise build
+        # UNSIGNED txs addressed to this recipient for the operator to sign.
+        wallet_key = wallet.private_key if wallet else ""
+        if wallet_key or self.settings.bankr_private_key:
+            outcome = await self.claimer.claim_wallet_cli(private_key=wallet_key or None)
         else:
-            outcome = await self.claimer.build_unsigned(addresses)
+            outcome = await self.claimer.build_unsigned(addresses, beneficiary=recipient)
         await self._record_claim(
-            addresses, total_weth, approval_status, outcome.mode, outcome.ok, outcome.detail
+            recipient, wlabel, addresses, total_weth, approval_status,
+            outcome.mode, outcome.ok, outcome.detail,
         )
         await self.tg.send(
-            f"{'✅' if outcome.ok else '❌'} claim [{outcome.mode}] {outcome.detail}"
+            f"{'✅' if outcome.ok else '❌'} claim [{wlabel}/{outcome.mode}] {outcome.detail}"
         )
 
     async def _record_claim(
         self,
+        recipient: str,
+        wallet_id: str,
         addresses: list[str],
         total_weth: float,
         approval_status: str,
@@ -452,7 +483,7 @@ class Orchestrator:
     ) -> None:
         """Build → log (JSON line) → persist a secret-free fee-claim record."""
         record = build_claim_record(
-            treasury=self.settings.treasury,
+            treasury=recipient,
             token_addresses=addresses,
             claimable_weth=total_weth,
             dry_run=self.settings.dry_run,
@@ -461,6 +492,7 @@ class Orchestrator:
             ok=ok,
             detail=detail,
             at=time.time(),
+            wallet_id=wallet_id,
         )
         log_claim_record(record)
         await self.store.save_claim_record(record)
@@ -473,6 +505,7 @@ class Orchestrator:
         self.tg.register("elon", self._cmd_elon)
         self.tg.register("claim", self._cmd_claim)
         self.tg.register("treasury", self._cmd_treasury)
+        self.tg.register("confirmpair", self._cmd_confirmpair)
         self.tg.register("pause", self._cmd_pause)
         self.tg.register("resume", self._cmd_resume)
 
@@ -484,9 +517,20 @@ class Orchestrator:
             "/elon <tweet text> — inject a test Elon tweet\n"
             "/claim — sweep + claim fees now\n"
             "/treasury — extracted fees + compute funding\n"
+            "/confirmpair <0xtoken> [note] — mark a stock-pair verified\n"
             "/pause — halt the pipeline\n"
             "/resume — resume the pipeline"
         )
+
+    async def _cmd_confirmpair(self, arg: str) -> str:
+        if not arg:
+            return "usage: /confirmpair <0xtoken> [note]"
+        token, _, note = arg.partition(" ")
+        token = token.strip()
+        tmap = await self.store.token_recipients()
+        ticker = tmap.get(token, {}).get("ticker", "")
+        await self.store.confirm_pair(token, ticker, note.strip())
+        return f"✅ stock-pair confirmed for {token[:12]}… ({ticker or 'unknown ticker'})"
 
     async def _cmd_status(self, _: str) -> str:
         remaining = await self.rate.remaining_today()
@@ -534,25 +578,37 @@ class Orchestrator:
 
     async def _cmd_treasury(self, _: str) -> str:
         s = await self.store.claim_summary()
-        line = (
-            f"Treasury {self.settings.treasury or 'unset'}\n"
-            f"claims: {s['claim_successes']}/{s['claim_attempts']} ok, "
-            f"{s['weth_claimed_recorded']:.6f} WETH recorded\n"
-            f"auto_claim={self.settings.auto_claim} min={self.settings.fee_claim_min_weth}"
-        )
+        by_wallet = await self.store.launch_counts_by_wallet()
+        recent = await self.store.recent_claims(3)
+        confirmed = await self.store.pair_confirmed_map()
+        lines = [
+            f"💰 Treasury {self.settings.treasury or 'unset'}",
+            f"claimed: {s['weth_claimed_recorded']:.6f} WETH "
+            f"({s['claim_successes']}/{s['claim_attempts']} claims ok)",
+            f"launches by wallet: {', '.join(f'{k}:{v}' for k, v in by_wallet.items()) or 'none'}",
+            f"stock-pairs confirmed: {sum(1 for v in confirmed.values() if v['confirmed'])}",
+            f"auto_claim={self.settings.auto_claim} min={self.settings.fee_claim_min_weth}",
+        ]
+        if recent:
+            lines.append("recent claims:")
+            for r in recent:
+                lines.append(
+                    f"  {r.get('timestamp', '')[:16]} [{r.get('wallet_id', '?')}/{r.get('mode', '?')}] "
+                    f"{r.get('claimable_weth', 0):.6f} WETH ok={r.get('ok')}"
+                )
         if self.settings.treasury:
             try:
                 async with FeeReader(self.settings.bankr_api_base) as reader:
                     totals = await reader.creator_totals(self.settings.treasury)
                 if totals:
-                    line += (
-                        f"\nBankr: lifetime {totals.get('lifetime_weth', 0)} / "
+                    lines.append(
+                        f"Bankr: lifetime {totals.get('lifetime_weth', 0)} / "
                         f"claimable {totals.get('claimable_weth', 0)} WETH "
                         f"({totals.get('token_count', 0)} tokens)"
                     )
             except Exception:  # noqa: BLE001
                 pass
-        return line
+        return "\n".join(lines)
 
     async def _cmd_pause(self, _: str) -> str:
         self._paused = True

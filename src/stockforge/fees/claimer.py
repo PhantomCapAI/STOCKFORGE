@@ -44,18 +44,21 @@ class FeeClaimer:
             self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
 
-    async def build_unsigned(self, token_addresses: list[str]) -> ClaimOutcome:
+    async def build_unsigned(
+        self, token_addresses: list[str], beneficiary: str | None = None
+    ) -> ClaimOutcome:
         """Build unsigned claim txs (no private key required). Up to 50 tokens.
-        Fees are claimed to the treasury (== beneficiary unless overridden)."""
-        treasury = self.settings.treasury
-        if not treasury:
-            return ClaimOutcome(False, "build-claim", "no treasury/BANKR_BENEFICIARY_ADDRESS set")
+        Claims to `beneficiary` (the fee recipient for these tokens); defaults to
+        the treasury."""
+        beneficiary = beneficiary or self.settings.treasury
+        if not beneficiary:
+            return ClaimOutcome(False, "build-claim", "no treasury/beneficiary set")
         url = f"{self.settings.bankr_api_base}/public/doppler/build-claim"
         try:
             r = await self.client.post(
                 url,
                 json={
-                    "beneficiaryAddress": treasury,
+                    "beneficiaryAddress": beneficiary,
                     "tokenAddresses": token_addresses[:50],
                 },
             )
@@ -66,15 +69,18 @@ class FeeClaimer:
         txs = data.get("transactions") or data.get("txs") or data
         return ClaimOutcome(True, "build-claim", "unsigned txs ready", unsigned_txs=txs)
 
-    async def claim_wallet_cli(self) -> ClaimOutcome:
-        """Headless claim-all via the CLI. Requires BANKR_PRIVATE_KEY + not dry_run."""
+    async def claim_wallet_cli(self, private_key: str | None = None) -> ClaimOutcome:
+        """Headless claim-all via the CLI. Uses `private_key` (a specific wallet's
+        hot key) or falls back to BANKR_PRIVATE_KEY. Requires a key + not dry_run.
+        The key is passed via env, never on the command line."""
         if self.settings.dry_run:
             return ClaimOutcome(True, "dry-run", "dry_run=True; claim suppressed")
-        if not self.settings.bankr_private_key:
+        key = private_key or self.settings.bankr_private_key
+        if not key:
             return ClaimOutcome(
-                False, "cli", "BANKR_PRIVATE_KEY not set; use build_unsigned() instead"
+                False, "cli", "no private key for this wallet; use build_unsigned() instead"
             )
-        env_note = "BANKR_PRIVATE_KEY passed via env (never argv)"
+        env_note = "private key passed via env (never argv)"
         args = [self.settings.bankr_cli_bin, "--ni", "fees", "claim-wallet", "--all"]
         log.info("CLI claim-all (%s)", env_note)
         try:
@@ -84,7 +90,7 @@ class FeeClaimer:
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "BANKR_PRIVATE_KEY": self.settings.bankr_private_key},
+                env={**os.environ, "BANKR_PRIVATE_KEY": key},
             )
             out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=180.0)
         except FileNotFoundError:

@@ -245,6 +245,37 @@ logs). It **never auto-posts to public social**; a `Publisher` seam lets a real 
 poster / content agent plug in later. The "not affiliated with <TICKER>"
 disclaimer is always included. Toggle with `STOCKFORGE_PROMO_ENABLED`.
 
+### Reading the extraction view
+
+`stockforge treasury` (or `/treasury`) is the at-a-glance capital view:
+
+- **💰 CLAIMED (recorded)** — total WETH your successful claims covered.
+- **wallets** — per-wallet launch attribution (which wallet is producing).
+- **top producing tokens** — launched tokens ranked by claimable WETH (a `✅pair`
+  marks a confirmed stock-pairing).
+- **stock-pair verification** — how many pairings are confirmed vs still pending a
+  manual check, with the exact `confirm-pair` command for each pending token.
+- **recent extraction activity** — the last few claims with wallet + mode.
+
+Fee sweeps read each token's claimable **against the address it routes to** (per
+wallet), and claim per wallet: a wallet with its own `private_key` claims with
+that key; otherwise unsigned txs are built for you to sign. Every claim is
+attributed and recorded secret-free.
+
+### Confirming a stock-pair (closing the UNVERIFIED gap)
+
+Stock-pairing has no documented Bankr parameter, so a launch's pairing stays
+`requested` (unverified) until you check it. After confirming on Bankr that the
+pool is really quoted in the stock:
+
+```bash
+stockforge confirm-pair 0xToken --note "pool quoted in NVDA on Bankr"
+# or in Telegram:  /confirmpair 0xToken pool quoted in NVDA
+```
+
+This persists the confirmation and clears the token from the pending-verification
+list. Until confirmed, treat a stock pair as a standard launch.
+
 ### Fees → compute (self-funding loop)
 
 `FORGE_LLM_PROVIDER=bankr` routes the concept forge through the **Bankr LLM

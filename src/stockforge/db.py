@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS fees (
 CREATE TABLE IF NOT EXISTS claims (
     at REAL, treasury TEXT, ok INTEGER, mode TEXT, claimable_weth REAL, data TEXT
 );
+CREATE TABLE IF NOT EXISTS pair_confirmations (
+    token_address TEXT PRIMARY KEY, ticker TEXT, confirmed INTEGER, at REAL, note TEXT
+);
 CREATE TABLE IF NOT EXISTS approvals (
     id TEXT PRIMARY KEY, kind TEXT, ref_id TEXT, status TEXT, created_at REAL, data TEXT
 );
@@ -142,6 +145,26 @@ class Store:
             out[wid] = out.get(wid, 0) + 1
         return out
 
+    async def token_recipients(self) -> dict[str, dict[str, str]]:
+        """Map each launched token -> {recipient, wallet_id, ticker} from records,
+        so fees can be swept/claimed against the address they actually route to."""
+        cur = await self.db.execute("SELECT token_address, data FROM launches WHERE token_address != ''")
+        rows = await cur.fetchall()
+        out: dict[str, dict[str, str]] = {}
+        for r in rows:
+            try:
+                d = json.loads(r["data"])
+                req = d.get("request", {})
+                rec = d.get("record", {})
+                out[r["token_address"]] = {
+                    "recipient": req.get("fee_recipient", ""),
+                    "wallet_id": req.get("wallet_id", "main"),
+                    "ticker": rec.get("paired_ticker", ""),
+                }
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
     async def confirmed_token_addresses(self) -> list[str]:
         cur = await self.db.execute(
             "SELECT DISTINCT token_address FROM launches "
@@ -180,6 +203,43 @@ class Store:
                     "at": r["at"],
                 }
             )
+        return out
+
+    async def confirm_pair(self, token_address: str, ticker: str, note: str = "") -> None:
+        """Operator confirms (out-of-band) that a launch's pool is really quoted in
+        the stock — closes the UNVERIFIED gap for that token."""
+        await self.db.execute(
+            "INSERT OR REPLACE INTO pair_confirmations VALUES (?,?,?,?,?)",
+            (token_address, ticker.upper(), 1, time.time(), note[:300]),
+        )
+        await self.db.commit()
+
+    async def pair_confirmed_map(self) -> dict[str, dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT token_address, ticker, confirmed, at, note FROM pair_confirmations"
+        )
+        rows = await cur.fetchall()
+        return {
+            r["token_address"]: {
+                "ticker": r["ticker"],
+                "confirmed": bool(r["confirmed"]),
+                "at": r["at"],
+                "note": r["note"],
+            }
+            for r in rows
+        }
+
+    async def recent_claims(self, limit: int = 5) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT data FROM claims ORDER BY at DESC LIMIT ?", (limit,)
+        )
+        rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            try:
+                out.append(json.loads(r["data"]))
+            except Exception:  # noqa: BLE001
+                continue
         return out
 
     async def save_claim_record(self, record: dict[str, Any]) -> None:

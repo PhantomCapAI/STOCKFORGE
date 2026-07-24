@@ -62,11 +62,14 @@ async def test_dryrun_claim_writes_secret_free_record(tmp_path):
     orch = Orchestrator(_settings(tmp_path))
     await orch.store.connect()
     try:
-        await orch._maybe_claim(["0xtok1", "0xtok2"], 0.05)
+        await orch._maybe_claim("0xTREASURY", ["0xtok1", "0xtok2"], 0.05)
         # A claim record row is persisted even in dry-run (transparency).
         cur = await orch.store.db.execute("SELECT data FROM claims")
         rows = await cur.fetchall()
         assert rows, "expected a persisted claim record"
         assert "PRIVATE" not in rows[0]["data"].upper()
+        import json
+        rec = json.loads(rows[0]["data"])
+        assert rec["treasury"] == "0xTREASURY"  # recipient recorded per claim
     finally:
         await orch.shutdown()
