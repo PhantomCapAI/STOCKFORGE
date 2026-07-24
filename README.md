@@ -35,18 +35,55 @@ stockforge preview NVDA       # forge + preview a launch — nothing is sent
 stockforge run                # start the autonomous loop (DRY-RUN by default)
 ```
 
-CLI:
+### Operator commands (the four you use most right now)
+
+During the verification phase these are the primary commands:
+
+| Command | What it does |
+|---|---|
+| `stockforge doctor` | fail-closed readiness check — auth, Bankr/Telegram connectivity, budget, LLM gateway |
+| `stockforge preflight` | go/no-go checklist: "am I ready to flip dry-run off?" (exits non-zero until every live prerequisite is green) |
+| `stockforge treasury` | the extraction view — claimed WETH, per-wallet/per-token production, stock-pair verification status, recent claims |
+| `stockforge confirm-pair <0xtoken> [--note]` | mark a launch's stock-pairing manually verified after you check it on Bankr |
+
+Full CLI:
 
 | Command | What it does |
 |---|---|
 | `stockforge run` | start the async orchestrator loop (default) |
-| `stockforge status` | print config + today's launch budget |
+| `stockforge status` | print config + budget + per-wallet usage |
 | `stockforge doctor` | fail-closed readiness check (auth, connectivity, Telegram, budget) |
 | `stockforge preflight` | pre-live checklist — "are you ready to flip dry-run off?" (fail-closed) |
+| `stockforge treasury` | extracted fees + per-wallet/per-token production + pair-verification + compute funding |
+| `stockforge confirm-pair <0xtoken> [--note]` | mark a stock-pairing manually verified |
 | `stockforge selfcheck [TICKER] [--chain] [--live-approval]` | run a full **dry-run** pipeline end to end |
 | `stockforge preview <TICKER> [--chain]` | forge a concept + show the exact Bankr request, no broadcast |
 | `stockforge launch <TICKER> [--chain]` | **one** controlled launch — respects dry-run + Telegram approval |
 | `stockforge fees <0xtoken>` | read fees for a token (public, no auth) |
+
+## Human Verification Gate
+
+**Do these in order on a real machine. Dry-run stays ON until the last step.**
+Nothing here spends money except the one deliberate Bankr launch in step 2.
+
+1. **Readiness — `stockforge doctor` then `stockforge preflight`.** Both must be
+   green (`preflight` must reach `✅ READY FOR LIVE`; it exits non-zero and prints
+   `⛔ NOT READY FOR LIVE` until every live prerequisite is present).
+2. **Do ONE real stock-paired launch on Bankr yourself** (Bankr UI/CLI), on
+   Robinhood Chain, and confirm the pool is quoted in the stock. This is the only
+   way to close the `pair_status` unknown — StockForge cannot verify the pairing
+   contract for you.
+3. **Record it — `stockforge confirm-pair <0xtoken> --note "pool quoted in NVDA"`.**
+   This marks that pairing verified and clears it from the pending list.
+4. **Verify the money view — `stockforge treasury`.** Confirm the token shows up,
+   the pairing reads as confirmed (`✅pair`), and (once fees accrue + a claim runs)
+   claimed WETH is tracked correctly.
+5. **Only then** consider flipping `STOCKFORGE_DRY_RUN=false` — start with
+   `STOCKFORGE_DAILY_LAUNCH_BUDGET=1` and keep `STOCKFORGE_REQUIRE_APPROVAL=true`
+   for the first real launch. See [`CLAUDE.md`](CLAUDE.md) for the full
+   go-live checklist.
+
+Until step 5, every launch is simulated and nothing broadcasts.
 
 ## Architecture
 

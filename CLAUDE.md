@@ -57,6 +57,20 @@ own compute. Async Python, SQLite state, Telegram human-in-the-loop.
   backend tries `/agent/job/{id}`, treats 404 as "leave SUBMITTED", and never
   fabricates a token address.
 
+## Human Verification Gate (operator, in order — dry-run stays ON until step 5)
+
+The primary operator commands right now are **`doctor`, `preflight`, `treasury`,
+`confirm-pair`**. Run the gate in order on a real machine:
+
+1. `stockforge doctor` **and** `stockforge preflight` — both green
+   (`preflight` must reach `✅ READY FOR LIVE`).
+2. Do ONE real stock-paired launch on Bankr yourself (Robinhood Chain); confirm
+   the pool is quoted in the stock. Only a human can close this.
+3. `stockforge confirm-pair <0xtoken> --note "…"` — record the verified pairing.
+4. `stockforge treasury` — confirm the token, the `✅pair` mark, and claimed-fee
+   tracking look right.
+5. Only then consider `STOCKFORGE_DRY_RUN=false` (start budget=1, keep approval on).
+
 ## Verify before going live
 
 - `stockforge doctor` — fail-closed readiness check: dry-run flag, Bankr auth +
