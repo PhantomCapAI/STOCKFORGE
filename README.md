@@ -59,7 +59,11 @@ Full CLI:
 | `stockforge selfcheck [TICKER] [--chain] [--live-approval]` | run a full **dry-run** pipeline end to end |
 | `stockforge preview <TICKER> [--chain]` | forge a concept + show the exact Bankr request, no broadcast |
 | `stockforge launch <TICKER> [--chain]` | **one** controlled launch — respects dry-run + Telegram approval |
+| `stockforge promo <TICKER>` | generate a full launch **copy package** (draft; nothing posted) |
 | `stockforge fees <0xtoken>` | read fees for a token (public, no auth) |
+
+Telegram mirrors these: `/status /launch /promo /claim /treasury /confirmpair
+/pause /resume` plus Approve/Reject buttons on every real launch or claim.
 
 ## Human Verification Gate
 
@@ -276,11 +280,22 @@ genuine high volume is a support ticket).
 
 ### Promotion (operator-gated)
 
-On each launch, StockForge composes a **promo kit** — a launch tweet, a one-line
-narrative hook, and the launch link — and sends it to you for review (Telegram +
-logs). It **never auto-posts to public social**; a `Publisher` seam lets a real X
-poster / content agent plug in later. The "not affiliated with <TICKER>"
-disclaimer is always included. Toggle with `STOCKFORGE_PROMO_ENABLED`.
+On each launch, StockForge composes a **promo kit** and sends it to you for review
+(Telegram + logs). It **never auto-posts to public social**; a `Publisher` seam
+lets a real X poster / content agent plug in later. The "not affiliated with
+<TICKER>" disclaimer is always included. Toggle with `STOCKFORGE_PROMO_ENABLED`.
+
+The **full copy package** — grab it anytime with `stockforge promo <TICKER>` or
+`/promo <TICKER>` — contains:
+
+- **Tweet** — the launch post (≤270 chars, CA + link + disclaimer).
+- **Narrative** — 2–3 sentences for a longer post / thread.
+- **Hashtags/cashtags** — `$SYMBOL` + `$TICKER`.
+- **Follow-ups** — a couple of reminder drafts to post later at your discretion.
+
+This gives a launch a real chance at attention while keeping you in control: the
+system drafts, **you** post. It never auto-spams. Use `stockforge launch` +
+`stockforge promo` to push a launch and grab its copy in two quick commands.
 
 ### Reading the extraction view
 

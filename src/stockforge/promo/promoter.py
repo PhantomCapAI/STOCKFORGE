@@ -26,29 +26,48 @@ _TWEET_MAX = 270
 
 @dataclass
 class PromoKit:
-    """Everything needed to promote one launch. Copy only — nothing is posted."""
+    """A full copy package for one launch. Copy only — nothing is posted. The
+    operator reviews and posts by hand (or wires a real Publisher later)."""
 
     symbol: str
     name: str
-    one_liner: str
-    tweet: str
+    one_liner: str  # narrative hook
+    narrative: str  # 2-3 sentence story for a longer post / thread
+    tweet: str  # launch tweet (<=270, disclaimer kept)
     launch_link: str = ""
     hashtags: list[str] = field(default_factory=list)
+    followups: list[str] = field(default_factory=list)  # reminder / follow-up copy
 
     def as_dict(self) -> dict:
         return {
             "symbol": self.symbol,
             "name": self.name,
             "one_liner": self.one_liner,
+            "narrative": self.narrative,
             "tweet": self.tweet,
             "launch_link": self.launch_link,
             "hashtags": self.hashtags,
+            "followups": self.followups,
         }
 
     def render(self) -> str:
-        lines = [f"📣 ${self.symbol} — {self.name}", "", self.one_liner, "", self.tweet]
+        """Compact render — the launch tweet + link (what most people post)."""
+        lines = [f"📣 ${self.symbol} — {self.name}", "", self.tweet]
         if self.launch_link:
             lines += ["", f"🔗 {self.launch_link}"]
+        return "\n".join(lines)
+
+    def render_full(self) -> str:
+        """Full copy package — tweet, narrative, hashtags, and follow-up drafts."""
+        lines = [f"📣 ${self.symbol} — {self.name}", "", "TWEET:", self.tweet]
+        if self.launch_link:
+            lines.append(f"🔗 {self.launch_link}")
+        lines += ["", "NARRATIVE:", self.narrative]
+        if self.hashtags:
+            lines += ["", "TAGS: " + " ".join(self.hashtags)]
+        if self.followups:
+            lines += ["", "FOLLOW-UPS (post later, at your discretion):"]
+            lines += [f"  {i+1}. {f}" for i, f in enumerate(self.followups)]
         return "\n".join(lines)
 
 
@@ -111,13 +130,27 @@ class Promoter:
             # Keep the disclaimer; trim the body.
             keep = f" CA: {result.token_address} {disclaimer}" if result.token_address else f" {disclaimer}"
             tweet = base[: _TWEET_MAX - len(keep) - 1].rstrip() + keep
+        # A short narrative for a longer post/thread (honest — disclaimer kept).
+        narrative = (
+            f"{concept.thesis.strip()} "
+            f"${concept.symbol} rides {ticker} attention; trading fees fund the agent that runs it."
+        ).strip()
+        # Optional follow-up drafts the operator can post later — never automatic.
+        followups = [
+            f"${concept.symbol} update — still riding the {ticker} tape. "
+            f"{('Pool: ' + link) if link else ''}".strip(),
+            f"Reminder: ${concept.symbol} is a {ticker}-narrative token, not affiliated with {ticker}. "
+            f"DYOR / NFA.",
+        ]
         return PromoKit(
             symbol=concept.symbol,
             name=concept.name,
             one_liner=one_liner,
+            narrative=narrative,
             tweet=tweet,
             launch_link=link,
             hashtags=[f"${concept.symbol}", f"${ticker}"],
+            followups=followups,
         )
 
     # Backwards-compatible alias used elsewhere.

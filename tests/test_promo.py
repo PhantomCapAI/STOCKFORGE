@@ -27,6 +27,20 @@ def test_kit_has_oneliner_tweet_link_and_disclaimer():
     assert "$SILNV" in kit.hashtags
 
 
+def test_kit_has_narrative_and_followups():
+    kit = Promoter().build_kit(_concept(), _result())
+    assert kit.narrative and "NVDA" in kit.narrative
+    assert len(kit.followups) >= 2
+    # A follow-up keeps the not-affiliated disclaimer.
+    assert any("not affiliated" in f.lower() for f in kit.followups)
+
+
+def test_render_full_includes_all_sections():
+    full = Promoter().build_kit(_concept(), _result()).render_full()
+    for section in ("TWEET:", "NARRATIVE:", "TAGS:", "FOLLOW-UPS"):
+        assert section in full
+
+
 def test_tweet_stays_within_budget():
     long = _concept()
     long.launch_tweet = "x" * 400  # force overflow

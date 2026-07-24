@@ -531,6 +531,7 @@ class Orchestrator:
         self.tg.register("elon", self._cmd_elon)
         self.tg.register("claim", self._cmd_claim)
         self.tg.register("treasury", self._cmd_treasury)
+        self.tg.register("promo", self._cmd_promo)
         self.tg.register("confirmpair", self._cmd_confirmpair)
         self.tg.register("pause", self._cmd_pause)
         self.tg.register("resume", self._cmd_resume)
@@ -543,6 +544,7 @@ class Orchestrator:
             "/elon <tweet text> — inject a test Elon tweet\n"
             "/claim — sweep + claim fees now\n"
             "/treasury — extracted fees + compute funding\n"
+            "/promo <TICKER> — full launch copy package (draft, not posted)\n"
             "/confirmpair <0xtoken> [note] — mark a stock-pair verified\n"
             "/pause — halt the pipeline\n"
             "/resume — resume the pipeline"
@@ -601,6 +603,22 @@ class Orchestrator:
     async def _cmd_claim(self, _: str) -> str:
         await self._fee_sweep()
         return "fee sweep triggered"
+
+    async def _cmd_promo(self, arg: str) -> str:
+        if not arg:
+            return "usage: /promo <TICKER>"
+        ticker = arg.split()[0].upper()
+        sig = self.scorer.enrich(
+            Signal(ticker=ticker, headline=f"{ticker} promo", sources=["operator"], meta={"magnitude": 20})
+        )
+        concept = await self.forge.forge(sig, recent_slugs=[])
+        if concept is None:
+            return f"no clean concept for {ticker} right now"
+        result = LaunchResult(request_id="preview", status=LaunchStatus.SIMULATED)
+        kit = self.promoter.build_kit(concept, result) if self.promoter else None
+        if kit is None:
+            return "promo disabled"
+        return kit.render_full() + "\n\n(Draft only — review + post manually.)"
 
     async def _cmd_treasury(self, _: str) -> str:
         s = await self.store.claim_summary()

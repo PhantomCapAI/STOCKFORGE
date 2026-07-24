@@ -6,6 +6,7 @@
                                  # exact Bankr request WITHOUT launching
   stockforge selfcheck [NVDA]    # run a full DRY-RUN pipeline end to end
   stockforge launch NVDA         # one controlled launch (respects dry-run + approval)
+  stockforge promo NVDA          # full launch copy package (draft; nothing posted)
   stockforge fees <0xtoken>      # read fees for a token (public, no auth)
   stockforge confirm-pair <tok>  # mark a stock-pairing manually verified
   stockforge treasury            # extracted fees + fees->compute funding status
@@ -58,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_launch.add_argument("ticker")
     p_launch.add_argument("--chain", default=None, choices=["base", "robinhood"])
+    p_promo = sub.add_parser("promo", help="generate a full launch copy package (no launch, no post)")
+    p_promo.add_argument("ticker")
     p_self = sub.add_parser("selfcheck", help="run a full dry-run pipeline end to end")
     p_self.add_argument("ticker", nargs="?", default="NVDA")
     p_self.add_argument("--chain", default=None, choices=["base", "robinhood"])
@@ -90,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_preview(args.ticker, args.chain))
         if cmd == "launch":
             return asyncio.run(_launch_once(args.ticker, args.chain))
+        if cmd == "promo":
+            return asyncio.run(_promo(args.ticker))
         if cmd == "selfcheck":
             return asyncio.run(_selfcheck(args.ticker, args.chain, args.live_approval))
         if cmd == "fees":
@@ -183,9 +188,16 @@ async def _treasury() -> int:
     confirmed = await store.pair_confirmed_map()
     await store.close()
 
-    # Headline: how much has actually been pulled.
-    print(f"  💰 CLAIMED (recorded)   : {summary['weth_claimed_recorded']:.6f} WETH "
-          f"across {summary['claim_successes']}/{summary['claim_attempts']} claims")
+    # === CAPITAL HEADER — the numbers that matter, at a glance ===============
+    claimable_now = sum(t["claimable_weth"] for t in per_token)
+    n_conf = sum(1 for v in confirmed.values() if v["confirmed"])
+    total_launched = sum(by_wallet.values())
+    print(f"  ┌{'─'*52}")
+    print(f"  │ 💰 CAPITAL PULLED (claimed) : {summary['weth_claimed_recorded']:.6f} WETH")
+    print(f"  │ 💧 CLAIMABLE NOW (pending)  : {claimable_now:.6f} WETH")
+    print(f"  │ 🚀 launches={total_launched}  claims_ok={summary['claim_successes']}/{summary['claim_attempts']}"
+          f"  ✅pairs={n_conf}")
+    print(f"  └{'─'*52}")
 
     # Wallet pool (one honest operation) + per-wallet launch attribution.
     pool = WalletPool.from_settings(settings)
@@ -237,6 +249,37 @@ async def _treasury() -> int:
     print(f"  loop        : {cf['loop']}")
     print(f"  llm_gateway : {cf['llm_gateway']}")
     print(f"  top up      : {cf['commands']['top_up']}  |  auto: {cf['commands']['auto_top_up']}")
+    return 0
+
+
+async def _promo(ticker: str) -> int:
+    """Generate a full launch copy package for a ticker — tweet, narrative,
+    hashtags, and follow-up drafts. Forges a concept only; NOTHING is launched or
+    posted. Lets the operator grab ready-to-post copy fast."""
+    from .forge import ConceptForge
+    from .models import LaunchResult, LaunchStatus, Signal
+    from .promo import Promoter
+    from .signal import AttentionScorer
+
+    _quiet_logs()
+    settings = get_settings()
+    ticker = ticker.upper()
+    scorer = AttentionScorer()
+    sig = scorer.enrich(
+        Signal(ticker=ticker, headline=f"{ticker} manual promo", sources=["cli"], meta={"magnitude": 20})
+    )
+    forge = ConceptForge(settings)
+    concept = await forge.forge(sig, recent_slugs=[])
+    await forge.aclose()
+    if concept is None:
+        print("concept rejected by anti-slop; try again")
+        return 1
+    # Empty result (no launch) — copy is pre-launch; CA/link fill in after a real launch.
+    result = LaunchResult(request_id="preview", status=LaunchStatus.SIMULATED)
+    kit = Promoter(link_base=settings.promo_link_base).build_kit(concept, result)
+    print(f"== Launch copy package — ${concept.symbol} ({ticker}) ==\n")
+    print(kit.render_full())
+    print("\n(Review + post manually. Nothing was launched or posted.)")
     return 0
 
 
