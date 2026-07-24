@@ -36,7 +36,12 @@ from ..models import (
 from ..observability import build_launch_record, log_launch_record
 from ..promo import Promoter
 from ..ratelimit import LaunchRateLimiter
-from ..signal import AttentionScorer, ManualSource, WatchlistHeuristicSource
+from ..signal import (
+    AttentionScorer,
+    ManualSource,
+    NewsRssSource,
+    WatchlistHeuristicSource,
+)
 from .telegram import TelegramControl
 
 log = get_logger("orchestrator")
@@ -58,7 +63,17 @@ class Orchestrator:
             self.store, daily_budget=settings.daily_launch_budget
         )
         self.manual = ManualSource()
-        self.sources = [WatchlistHeuristicSource(settings.watchlist), self.manual]
+        # Real attention first (news), then the baseline heuristic + manual queue.
+        # The heuristic keeps the pipeline exercised even when there's no news.
+        self.sources: list = []
+        if settings.news_source_enabled:
+            self.sources.append(
+                NewsRssSource(
+                    settings.watchlist,
+                    freshness_hours=settings.news_freshness_hours,
+                )
+            )
+        self.sources += [WatchlistHeuristicSource(settings.watchlist), self.manual]
         self.tg = TelegramControl(settings.telegram_bot_token, settings.telegram_chat_id)
         self.promoter = Promoter(notifier=self.tg.send)
         self._paused = False

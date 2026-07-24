@@ -22,7 +22,9 @@ _HOT_PRIOR = {
 }
 
 # Words that indicate a live, tradable narrative (not just background noise).
-_NARRATIVE_WORDS = (
+# Public so real sources (e.g. the news source) can rank headlines by the same
+# vocabulary the scorer rewards.
+NARRATIVE_WORDS = (
     "surge",
     "halt",
     "squeeze",
@@ -48,7 +50,7 @@ class AttentionScorer:
         s += min(len(signal.sources), 5) * 8  # up to 40
         # Narrative keywords in the headline.
         headline = signal.headline.lower()
-        hits = sum(1 for w in _NARRATIVE_WORDS if w in headline)
+        hits = sum(1 for w in NARRATIVE_WORDS if w in headline)
         s += min(hits, 4) * 9  # up to 36
         # Ticker prior.
         s += _HOT_PRIOR.get(signal.ticker.upper(), 4)

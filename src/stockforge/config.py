@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     watchlist_raw: str = Field(
         default="NVDA,GME,TSLA,HOOD,SPY,AMD,PLTR,MSTR", alias="STOCKFORGE_WATCHLIST"
     )
+    # Real attention source: financial-news volume via Google News RSS (no key).
+    # Off by default so the pipeline makes no external calls unless opted in.
+    news_source_enabled: bool = Field(default=False, alias="STOCKFORGE_NEWS_SOURCE")
+    news_freshness_hours: int = Field(default=24, alias="STOCKFORGE_NEWS_FRESHNESS_HOURS")
 
     @field_validator("default_chain", "bankr_backend", "forge_llm_provider", mode="before")
     @classmethod
@@ -96,6 +100,7 @@ class Settings(BaseSettings):
             "min_attention_score": self.min_attention_score,
             "telegram_enabled": self.telegram_enabled,
             "forge_llm_provider": self.forge_llm_provider,
+            "news_source": self.news_source_enabled,
             "watchlist": self.watchlist,
         }
 

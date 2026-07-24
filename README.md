@@ -57,7 +57,7 @@ src/stockforge/
   db.py             # async SQLite state (WAL); daily counters
   ratelimit.py      # Bankr 50/100-day + 1/min, counts failures; token bucket
   circuit.py        # circuit breaker around Bankr calls
-  signal/           # attention scoring + signal sources (watchlist, manual)
+  signal/           # attention scoring + signal sources (news RSS, watchlist, manual)
   forge/            # concept generation (template or LLM) + anti-slop/uniqueness
   launcher/         # Bankr CLI + REST backends, unified facade, dry-run switch
   fees/             # public fee reader + claimer (build-claim / wallet CLI)
@@ -171,7 +171,7 @@ docker compose up --build          # local
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 23 tests: ratelimit, anti-slop, circuit, dry-run, forge
+pytest -q          # 48 tests: ratelimit, anti-slop, circuit, dry-run, forge, news signal
 ruff check src tests
 ```
 
