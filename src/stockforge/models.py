@@ -44,6 +44,7 @@ class Concept(BaseModel):
     image_prompt: str = ""
     image_url: str = ""
     launch_tweet: str = ""
+    source_tweet_url: str = ""  # e.g. the Elon tweet that triggered this concept
     uniqueness_score: float = 0.0  # 0-1, higher = less sloppy/duplicative
     created_at: float = Field(default_factory=_now)
 

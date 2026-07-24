@@ -106,3 +106,35 @@ async def test_source_emits_only_for_hits():
     assert s.sources == ["elon", "x"]
     assert s.meta["magnitude"] > 0
     assert "tweet_id" in s.meta
+
+
+async def test_source_sets_tweet_url():
+    inbox = TweetInbox()
+    inbox.push("$TSLA squeeze", tweet_id="1234567890")
+    src = ElonTweetSource(inbox, handle="elonmusk")
+    sigs = await src.poll()
+    assert sigs[0].meta["tweet_url"] == "https://x.com/elonmusk/status/1234567890"
+
+
+# -- Grok provider parsing (no network) -------------------------------------
+
+
+def test_parse_grok_tweets_with_fences_and_prose():
+    from stockforge.signal.elon import parse_grok_tweets
+
+    content = (
+        "Sure! Here are the tweets:\n```json\n"
+        '{"tweets":[{"id":"1","text":"Dogecoin to the moon","like_count":300000,'
+        '"retweet_count":40000},{"id":"2","text":"","like_count":0,"retweet_count":0}]}'
+        "\n```"
+    )
+    tweets = parse_grok_tweets(content)
+    assert len(tweets) == 1  # empty-text row dropped
+    assert tweets[0].text == "Dogecoin to the moon"
+    assert tweets[0].like_count == 300000
+
+
+def test_parse_grok_tweets_garbage_is_safe():
+    from stockforge.signal.elon import parse_grok_tweets
+
+    assert parse_grok_tweets("no json here") == []

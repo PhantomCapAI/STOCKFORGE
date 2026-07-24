@@ -152,6 +152,98 @@ class XApiTweetProvider:
             return []
 
 
+class GrokTweetProvider:
+    """Fetches recent tweets via xAI Grok, which has native real-time access to
+    X. Uses the standard OpenAI-compatible chat-completions endpoint (no
+    undocumented handle-search params) and asks Grok to return recent original
+    posts as strict JSON. LLM-mediated and best-effort: engagement counts may be
+    approximate or absent, so the mark for Grok-sourced tweets leans on the
+    ticker + hype/cashtag signal. Returns [] on any error."""
+
+    def __init__(
+        self,
+        api_key: str,
+        user_id: str = ELON_USER_ID,
+        *,
+        handle: str = "elonmusk",
+        base_url: str = "https://api.x.ai/v1",
+        model: str = "grok-4",
+        max_tweets: int = 5,
+        timeout: float = 30.0,
+    ):
+        self.api_key = api_key
+        self.user_id = user_id
+        self.handle = handle
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.max_tweets = max_tweets
+        self.timeout = timeout
+
+    async def fetch_recent(self) -> list[Tweet]:
+        if not self.api_key:
+            return []
+        system = (
+            "You have real-time access to X (Twitter). Return ONLY a JSON object, "
+            "no prose."
+        )
+        user = (
+            f"Give @{self.handle}'s {self.max_tweets} most recent ORIGINAL posts "
+            "(not replies or reposts) from the last 24 hours. Respond as JSON: "
+            '{"tweets":[{"id":"<tweet id or url>","text":"<full text>",'
+            '"like_count":<int>,"retweet_count":<int>}]}. Use 0 if a count is unknown.'
+        )
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0,
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions", json=body, headers=headers
+                )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            return parse_grok_tweets(content, handle=self.handle)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Grok tweet fetch failed: %r", e)
+            return []
+
+
+def parse_grok_tweets(content: str, *, handle: str = "elonmusk") -> list[Tweet]:
+    """Extract Tweets from Grok's JSON reply. Tolerant of code fences / stray
+    prose around the JSON object."""
+    import json
+    import re as _re
+
+    m = _re.search(r"\{.*\}", content, _re.DOTALL)
+    if not m:
+        return []
+    try:
+        obj = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return []
+    out: list[Tweet] = []
+    for row in obj.get("tweets", []) or []:
+        text = (row.get("text") or "").strip()
+        if not text:
+            continue
+        out.append(
+            Tweet(
+                id=str(row.get("id", "") or ""),
+                text=text,
+                created_at=datetime.now(UTC),
+                like_count=int(row.get("like_count", 0) or 0),
+                retweet_count=int(row.get("retweet_count", 0) or 0),
+            )
+        )
+    return out
+
+
 def parse_x_api(payload: dict) -> list[Tweet]:
     """Parse an X API v2 users/:id/tweets response into Tweets. Tolerant of
     missing fields."""
@@ -236,7 +328,15 @@ class ElonTweetSource:
     provider: TweetProvider
     ticker_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_TICKER_MAP))
     min_engagement: float = 10_000.0
+    handle: str = "elonmusk"
     name: str = "elon-tweets"
+
+    def _tweet_url(self, tweet_id: str) -> str:
+        if not tweet_id:
+            return ""
+        if tweet_id.startswith("http"):
+            return tweet_id
+        return f"https://x.com/{self.handle}/status/{tweet_id}"
 
     async def poll(self) -> list[Signal]:
         try:
@@ -259,6 +359,7 @@ class ElonTweetSource:
                     meta={
                         "magnitude": mark.magnitude,
                         "tweet_id": tw.id,
+                        "tweet_url": self._tweet_url(tw.id),
                         "engagement": tw.engagement,
                         "provider": "elon-tweets",
                         "reason": mark.reason,

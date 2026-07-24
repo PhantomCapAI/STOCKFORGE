@@ -123,6 +123,16 @@ class Settings(BaseSettings):
     xai_base_url: str = Field(default="https://api.x.ai/v1", alias="XAI_BASE_URL")
     xai_model: str = Field(default="grok-4", alias="XAI_MODEL")
 
+    # ---- Metadata enrichment -------------------------------------------------
+    # Generate a token image (xAI Imagine) and inject it into the launch — but
+    # ONLY for strong/meme-worthy launches (score >= image_min_score), not every
+    # token. Needs XAI_API_KEY. Off by default.
+    image_gen_enabled: bool = Field(default=False, alias="STOCKFORGE_IMAGE_GEN")
+    image_min_score: int = Field(default=80, alias="STOCKFORGE_IMAGE_MIN_SCORE")
+    xai_image_model: str = Field(default="grok-2-image", alias="XAI_IMAGE_MODEL")
+    # Optional website injected into every launch (blank = none).
+    default_website: str = Field(default="", alias="STOCKFORGE_DEFAULT_WEBSITE")
+
     @field_validator("default_chain", "bankr_backend", "forge_llm_provider", "elon_provider", mode="before")
     @classmethod
     def _lower(cls, v: str) -> str:

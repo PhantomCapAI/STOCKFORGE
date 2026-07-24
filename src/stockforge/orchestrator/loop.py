@@ -22,6 +22,7 @@ from ..config import Settings
 from ..db import Store
 from ..fees import FeeClaimer, FeeReader
 from ..forge import ConceptForge
+from ..forge.image import ImageForge
 from ..launcher import BankrLauncher
 from ..logging import get_logger
 from ..models import (
@@ -62,6 +63,7 @@ class Orchestrator:
         self.store = Store(settings.db_path)
         self.scorer = AttentionScorer()
         self.forge = ConceptForge(settings)
+        self.image_forge = ImageForge(settings)
         self.breaker = CircuitBreaker("bankr", failure_threshold=3, reset_timeout=300)
         self.launcher = BankrLauncher(settings, breaker=self.breaker)
         self.claimer = FeeClaimer(settings)
@@ -142,6 +144,7 @@ class Orchestrator:
         self._stop.set()
         await self.tg.stop()
         await self.forge.aclose()
+        await self.image_forge.aclose()
         await self.claimer.aclose()
         await self.store.close()
         log.info("shutdown complete")
@@ -237,6 +240,7 @@ class Orchestrator:
             if concept is None:
                 log.info("no clean concept for %s; trying next", signal.ticker)
                 continue
+            await self._enrich_metadata(concept, signal)
             await self.store.save_concept(concept)
             result = await self._attempt_launch(concept)
             # Stop once a launch was attempted or no wallet has capacity left.
@@ -255,6 +259,26 @@ class Orchestrator:
         eligible.sort(key=lambda s: s.attention_score, reverse=True)
         return eligible
 
+    # ---- metadata enrichment -------------------------------------------------
+    async def _enrich_metadata(self, concept: Concept, signal: Signal) -> None:
+        """Attach the source tweet and — only for strong/meme-worthy launches —
+        a generated image. Image gen fires when the signal clears image_min_score
+        (so it's reserved for viral picks, e.g. an Elon meme), not every token."""
+        concept.source_tweet_url = str(signal.meta.get("tweet_url", "") or "")
+        if (
+            self.image_forge.enabled
+            and not concept.image_url
+            and concept.image_prompt
+            and signal.attention_score >= self.settings.image_min_score
+        ):
+            log.info(
+                "generating image for $%s (score %.0f >= %d)",
+                concept.symbol,
+                signal.attention_score,
+                self.settings.image_min_score,
+            )
+            concept.image_url = await self.image_forge.generate(concept.image_prompt)
+
     # ---- launch --------------------------------------------------------------
     def _build_request(self, concept: Concept, wallet: Wallet) -> LaunchRequest:
         return LaunchRequest(
@@ -264,6 +288,8 @@ class Orchestrator:
             chain=self.settings.default_chain,
             wallet_id=wallet.id,
             image_url=concept.image_url,
+            tweet_url=concept.source_tweet_url,
+            website=self.settings.default_website,
             # Route creator fees to this wallet's recipient (defaults to the main
             # treasury, so fees consolidate regardless of which wallet launched).
             fee_recipient=wallet.fee_recipient,
