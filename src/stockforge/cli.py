@@ -27,6 +27,17 @@ log = get_logger("cli")
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The CLI prints status glyphs (✅ ⚠️ ❌). On Windows the console defaults to
+    # a legacy codepage (cp1252) that can't encode them, which crashes every
+    # command with UnicodeEncodeError. Force UTF-8 on the standard streams.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
     settings = get_settings()
     setup_logging(settings.log_level)
 
