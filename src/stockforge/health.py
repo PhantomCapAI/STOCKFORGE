@@ -204,3 +204,85 @@ async def run_doctor(settings: Settings) -> tuple[list[Check], bool]:
     # missing guardrails as 'fail' inside the individual checks above.
     overall_ok = not any(c.level == "fail" for c in checks)
     return checks, overall_ok
+
+
+def _missing_live_env(settings: Settings) -> list[str]:
+    """Critical env vars that MUST be set before a live launch can work safely."""
+    missing: list[str] = []
+    if settings.bankr_backend == "rest" and not settings.bankr_api_key:
+        missing.append("BANKR_API_KEY")
+    if not settings.bankr_beneficiary_address:
+        missing.append("BANKR_BENEFICIARY_ADDRESS")
+    if not settings.telegram_bot_token:
+        missing.append("TELEGRAM_BOT_TOKEN")
+    if not settings.telegram_chat_id:
+        missing.append("TELEGRAM_CHAT_ID")
+    return missing
+
+
+async def run_preflight(settings: Settings) -> tuple[list[Check], bool]:
+    """Pre-live readiness checklist. Unlike `doctor` (which is happy in dry-run),
+    preflight answers 'are you ready to flip dry-run OFF?' — it returns not-ready
+    until every live prerequisite is satisfied, and always flags stock-pairing as
+    UNVERIFIED (manual confirmation required)."""
+    checks: list[Check] = []
+
+    # 1. Dry-run state (explicit).
+    checks.append(
+        Check(
+            "dry-run currently ON",
+            "ok" if settings.dry_run else "warn",
+            "nothing broadcasts" if settings.dry_run else "OFF — LIVE mode, real launches/claims can broadcast",
+        )
+    )
+    # 2. Bankr key present + responds.
+    checks.append(_check_bankr_auth(settings))
+    bankr_reach, cli_checks, tg_checks, rate_check = await asyncio.gather(
+        _check_bankr_reachable(settings),  # responds?
+        _check_cli(settings),  # 3. CLI installed + authenticated
+        _check_telegram(settings),  # 4. Telegram bot + chat reachable
+        _check_rate_state(settings),  # 6. rate-limiter remaining
+    )
+    checks.append(bankr_reach)
+    checks += cli_checks
+    checks += tg_checks
+    # 5. Daily budget value (informational; small is safer for first live).
+    checks.append(
+        Check(
+            "daily launch budget",
+            "ok" if settings.daily_launch_budget <= 3 else "warn",
+            f"{settings.daily_launch_budget} (start at 1 for first live launch)",
+        )
+    )
+    checks.append(rate_check)  # 6. remaining capacity
+    # 7. Beneficiary.
+    checks.append(
+        Check(
+            "beneficiary address set",
+            "ok" if settings.bankr_beneficiary_address else "warn",
+            "set" if settings.bankr_beneficiary_address else "BANKR_BENEFICIARY_ADDRESS unset — no fee reads/claims",
+        )
+    )
+    # 8. Stock-pairing status — ALWAYS a manual gate.
+    checks.append(
+        Check(
+            "stock-pairing status",
+            "warn",
+            "UNVERIFIED — confirm one paired launch on Bankr manually before trusting pair_status=accepted "
+            "(requires BANKR_BACKEND=rest + chain=robinhood)",
+        )
+    )
+    # 9. Missing critical env vars.
+    missing = _missing_live_env(settings)
+    checks.append(
+        Check(
+            "critical env vars",
+            "ok" if not missing else "warn",
+            "all set" if not missing else f"missing for live: {', '.join(missing)}",
+        )
+    )
+
+    # Ready-for-live = no hard fails AND no missing critical env. In dry-run this
+    # will typically report NOT READY until the human fills real values — by design.
+    ready = not any(c.level == "fail" for c in checks) and not missing
+    return checks, ready

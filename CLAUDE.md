@@ -63,10 +63,44 @@ own compute. Async Python, SQLite state, Telegram human-in-the-loop.
   reachability, CLI installed/authenticated (`bankr whoami`), Telegram token +
   chat reachability (`getMe`/`getChat`), rate-limiter/budget state. Exits
   non-zero on any ❌.
+- `stockforge preflight` — pre-live checklist: "are you ready to flip dry-run
+  off?" Reuses the doctor checks but is **not** satisfied in dry-run — it exits
+  non-zero (`⛔ NOT READY FOR LIVE`) until every live prerequisite is present, and
+  always flags stock-pairing as UNVERIFIED. Use this as the go/no-go gate.
 - `stockforge selfcheck [TICKER] [--chain robinhood] [--live-approval]` — runs a
   full **dry-run** pipeline (signal → concept → launch(sim) → fee check →
   approval flow) so a human can verify everything without spending a launch.
   Refuses to run if `dry_run=false`.
+- `stockforge launch <TICKER> [--chain]` — the **controlled single-launch** path.
+  Respects dry-run (default → SIMULATED, nothing broadcasts) and, when live,
+  requires a Telegram approval tap. Every attempt logs the exact prompt and a
+  secret-free `launch_record` (see Observability below).
+
+## Observability
+
+Every launch attempt — dry-run included — emits one secret-free structured
+`launch_record` JSON line to stdout (`observability.py`) **and** is persisted to
+SQLite (`launches.data.record`). Fields: timestamp, name, ticker, requested pair,
+final mode (stock-pair / standard), dry-run flag, approval status, and a Bankr
+response summary (status/token/job/error). No API keys or private keys ever
+appear — the only address included is the public beneficiary/fee recipient.
+
+## Path to First Live Launch (do these in order; dry-run stays ON until step 5)
+
+1. `stockforge doctor` (config sanity) **and** `stockforge preflight` (live
+   prerequisites — must reach `✅ READY FOR LIVE`).
+2. **Manually** do one real stock-paired launch on Bankr yourself and confirm the
+   pool is quoted in the stock. This is the only way to close the `pair_status`
+   unknown — the agent cannot verify the pairing contract for you.
+3. Fill real `.env` with `STOCKFORGE_DRY_RUN=true`: `BANKR_API_KEY`,
+   `BANKR_BENEFICIARY_ADDRESS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
+   dedicated minimally-funded hot wallet.
+4. `stockforge selfcheck --live-approval` (buttons must work) then
+   `stockforge launch NVDA --chain robinhood` (single dry-run launch); confirm the
+   `launch_record` line looks correct.
+5. Only then set `STOCKFORGE_DAILY_LAUNCH_BUDGET=1`, flip
+   `STOCKFORGE_DRY_RUN=false`, and run ONE `stockforge launch <TICKER>` — it will
+   require a Telegram approval tap before anything broadcasts.
 
 ## DO NOT turn off dry-run until ALL of these are true
 

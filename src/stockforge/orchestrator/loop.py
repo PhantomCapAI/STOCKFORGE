@@ -29,9 +29,11 @@ from ..models import (
     ApprovalKind,
     Concept,
     LaunchRequest,
+    LaunchResult,
     LaunchStatus,
     Signal,
 )
+from ..observability import build_launch_record, log_launch_record
 from ..promo import Promoter
 from ..ratelimit import LaunchRateLimiter
 from ..signal import AttentionScorer, ManualSource, WatchlistHeuristicSource
@@ -135,13 +137,8 @@ class Orchestrator:
         return eligible[0]
 
     # ---- launch --------------------------------------------------------------
-    async def _attempt_launch(self, concept: Concept) -> None:
-        decision = await self.rate.check()
-        if not decision.allowed:
-            log.info("launch gated: %s", decision.reason)
-            return
-
-        req = LaunchRequest(
+    def _build_request(self, concept: Concept) -> LaunchRequest:
+        return LaunchRequest(
             concept_id=concept.id,
             name=concept.name,
             symbol=concept.symbol,
@@ -155,6 +152,16 @@ class Orchestrator:
             pair_with=concept.paired_ticker if self.settings.default_chain == "robinhood" else "",
         )
 
+    async def gated_launch(self, concept: Concept) -> LaunchResult | None:
+        """The single controlled launch path: rate-limit → approval → dry-run →
+        Bankr → structured record. Returns None if gated or rejected. Used by both
+        the autonomous loop and the explicit one-shot CLI `stockforge launch`."""
+        decision = await self.rate.check()
+        if not decision.allowed:
+            log.info("launch gated: %s", decision.reason)
+            return None
+
+        req = self._build_request(concept)
         preview = self.launcher.preview(req)
         summary = (
             f"LAUNCH ${req.symbol} — {req.name}\n"
@@ -163,6 +170,9 @@ class Orchestrator:
             f"prompt: {preview['prompt']}"
         )
 
+        # Approval is required for REAL launches. Dry-run auto-proceeds (nothing
+        # broadcasts) but is still fully recorded.
+        approval_status = "not_required (dry-run)" if self.settings.dry_run else "auto (approval off)"
         if self.settings.require_approval and not self.settings.dry_run:
             approval = Approval(kind=ApprovalKind.LAUNCH, ref_id=req.id, summary=summary)
             await self.store.save_approval(approval)
@@ -170,23 +180,21 @@ class Orchestrator:
             approval.status = "approved" if ok else "rejected"
             approval.decided_at = time.time()
             await self.store.save_approval(approval)
+            approval_status = approval.status
             if not ok:
-                log.info("launch %s rejected by operator", req.symbol)
-                return
+                log.info("launch %s rejected/denied by operator", req.symbol)
+                # Record the denied attempt too (transparency) — no Bankr call made.
+                denied = LaunchResult(request_id=req.id, status=LaunchStatus.REJECTED, error="operator denied")
+                await self._record(concept, req, denied, approval_status, preview)
+                return None
         else:
             await self.tg.send(f"▶️ Auto-launch (dry_run={self.settings.dry_run})\n{summary}")
 
         # Count the attempt BEFORE calling (Bankr counts failures too).
         await self.rate.record()
         result = await self.launcher.launch(req)
-        await self.store.save_launch(req, result)
-        log.info(
-            "launch %s -> %s pair=%s %s",
-            req.symbol,
-            result.status.value,
-            result.pair_status.value,
-            result.token_address,
-        )
+        await self._record(concept, req, result, approval_status, preview)
+
         pair_line = ""
         if result.pair_requested:
             pair_line = f"\npair {result.pair_requested.upper()}: {result.pair_status.value}"
@@ -195,7 +203,45 @@ class Orchestrator:
             f"${req.symbol} {result.status.value} {result.token_address or result.error}"
             f"{pair_line}"
         )
-        if result.status in (LaunchStatus.CONFIRMED, LaunchStatus.SUBMITTED, LaunchStatus.SIMULATED):
+        return result
+
+    async def _record(
+        self,
+        concept: Concept,
+        req: LaunchRequest,
+        result: LaunchResult,
+        approval_status: str,
+        preview: dict,
+    ) -> None:
+        """Build → log (JSON line) → persist the secret-free launch record."""
+        record = build_launch_record(
+            req,
+            result,
+            dry_run=self.settings.dry_run,
+            approval_status=approval_status,
+            backend=self.settings.bankr_backend,
+            prompt=preview["prompt"],
+            paired_ticker=concept.paired_ticker,
+            cli_command=preview["cli_args"] if self.settings.bankr_backend == "cli" else None,
+        )
+        log_launch_record(record)
+        await self.store.save_launch(req, result, record=record)
+        log.info(
+            "launch %s -> %s pair=%s mode=%s %s",
+            req.symbol,
+            result.status.value,
+            result.pair_status.value,
+            record["final_mode"],
+            result.token_address,
+        )
+
+    async def _attempt_launch(self, concept: Concept) -> None:
+        result = await self.gated_launch(concept)
+        if result and result.status in (
+            LaunchStatus.CONFIRMED,
+            LaunchStatus.SUBMITTED,
+            LaunchStatus.SIMULATED,
+        ):
             if self.promoter:
                 await self.promoter.promote(concept, result)
 

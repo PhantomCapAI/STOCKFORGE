@@ -99,8 +99,11 @@ class Store:
         return out
 
     # ---- launches ------------------------------------------------------------
-    async def save_launch(self, req: LaunchRequest, res: LaunchResult) -> None:
-        payload = {"request": req.model_dump(), "result": res.model_dump()}
+    async def save_launch(
+        self, req: LaunchRequest, res: LaunchResult, record: dict[str, Any] | None = None
+    ) -> None:
+        # `record` is the secret-free structured launch record (observability.py).
+        payload = {"request": req.model_dump(), "result": res.model_dump(), "record": record or {}}
         await self.db.execute(
             "INSERT OR REPLACE INTO launches VALUES (?,?,?,?,?,?,?)",
             (

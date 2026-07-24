@@ -5,8 +5,10 @@
   stockforge preview NVDA        # forge a concept for a ticker and preview the
                                  # exact Bankr request WITHOUT launching
   stockforge selfcheck [NVDA]    # run a full DRY-RUN pipeline end to end
+  stockforge launch NVDA         # one controlled launch (respects dry-run + approval)
   stockforge fees <0xtoken>      # read fees for a token (public, no auth)
   stockforge doctor              # environment / readiness check (fail-closed)
+  stockforge preflight           # pre-live readiness checklist (fail-closed)
 
 Also runnable as `python -m stockforge.cli ...`.
 """
@@ -33,9 +35,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("run", help="start the autonomous orchestrator loop")
     sub.add_parser("status", help="print config + launch budget")
     sub.add_parser("doctor", help="check environment readiness (fail-closed)")
+    sub.add_parser("preflight", help="pre-live readiness checklist (fail-closed)")
     p_prev = sub.add_parser("preview", help="forge + preview a launch (no broadcast)")
     p_prev.add_argument("ticker")
     p_prev.add_argument("--chain", default=None, choices=["base", "robinhood"])
+    p_launch = sub.add_parser(
+        "launch", help="controlled SINGLE launch (respects dry-run + approval)"
+    )
+    p_launch.add_argument("ticker")
+    p_launch.add_argument("--chain", default=None, choices=["base", "robinhood"])
     p_self = sub.add_parser("selfcheck", help="run a full dry-run pipeline end to end")
     p_self.add_argument("ticker", nargs="?", default="NVDA")
     p_self.add_argument("--chain", default=None, choices=["base", "robinhood"])
@@ -57,8 +65,12 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_status())
         if cmd == "doctor":
             return asyncio.run(_doctor())
+        if cmd == "preflight":
+            return asyncio.run(_preflight())
         if cmd == "preview":
             return asyncio.run(_preview(args.ticker, args.chain))
+        if cmd == "launch":
+            return asyncio.run(_launch_once(args.ticker, args.chain))
         if cmd == "selfcheck":
             return asyncio.run(_selfcheck(args.ticker, args.chain, args.live_approval))
         if cmd == "fees":
@@ -109,6 +121,89 @@ async def _doctor() -> int:
     else:
         print("\n  result: NOT READY — resolve ❌ items above before running live")
     return 0 if ok else 1
+
+
+async def _preflight() -> int:
+    from .health import run_preflight
+
+    settings = get_settings()
+    print("== StockForge preflight (path to first live launch) ==")
+    print(f"  backend={settings.bankr_backend} chain={settings.default_chain} "
+          f"dry_run={settings.dry_run} require_approval={settings.require_approval}\n")
+    checks, ready = await run_preflight(settings)
+    for i, c in enumerate(checks, 1):
+        print(f"  {i}. {c.render().strip()}")
+    if ready:
+        print("\n  ✅ READY FOR LIVE — all critical prerequisites present.")
+        print("     Still required MANUALLY: verify one stock-paired launch on Bankr,")
+        print("     then set STOCKFORGE_DAILY_LAUNCH_BUDGET=1 before flipping dry-run off.")
+    else:
+        print("\n  ⛔ NOT READY FOR LIVE — resolve the flagged items above.")
+        print("     Dry-run stays ON until every critical item is green. This is by design.")
+    return 0 if ready else 1
+
+
+async def _launch_once(ticker: str, chain: str | None) -> int:
+    """Controlled single launch. Respects dry-run (default) and, when live,
+    Telegram approval. Logs the exact prompt and records the pair outcome."""
+    from .models import Signal
+    from .orchestrator import Orchestrator
+    from .signal import AttentionScorer
+
+    settings = get_settings()
+    if chain:
+        settings.default_chain = chain
+    ticker = ticker.upper()
+    mode = "DRY-RUN (nothing broadcasts)" if settings.dry_run else "LIVE"
+    print(f"== Controlled single launch — {ticker} on {settings.default_chain} [{mode}] ==")
+
+    orch = Orchestrator(settings)
+    await orch.store.connect()
+    try:
+        scorer = AttentionScorer()
+        sig = scorer.enrich(
+            Signal(
+                ticker=ticker,
+                headline=f"{ticker} manual single launch",
+                sources=["cli", "operator"],
+                meta={"magnitude": 20},
+            )
+        )
+        recent = await orch.store.recent_concept_slugs()
+        concept = await orch.forge.forge(sig, recent_slugs=recent)
+        if concept is None:
+            print("❌ concept rejected by anti-slop; nothing launched.")
+            return 1
+        await orch.store.save_concept(concept)
+        print(f"  concept: ${concept.symbol} '{concept.name}'")
+
+        # For a LIVE launch that needs approval, run the Telegram poller so the
+        # Approve/Reject buttons actually resolve.
+        poller = None
+        if not settings.dry_run and settings.require_approval and orch.tg.enabled:
+            print("  waiting for Telegram approval (tap Approve/Reject)…")
+            poller = asyncio.create_task(orch.tg.run())
+        try:
+            result = await orch.gated_launch(concept)
+        finally:
+            if poller is not None:
+                await orch.tg.stop()
+                poller.cancel()
+
+        if result is None:
+            print("  ⛔ not launched (rate-limited, or approval denied/unavailable). See logs.")
+            return 1
+        print(f"  status={result.status.value}  pair={result.pair_status.value}"
+              f"  (requested={result.pair_requested or 'none'})")
+        if result.token_address:
+            print(f"  token: {result.token_address}")
+        if result.error:
+            print(f"  error: {result.error}")
+        return 0
+    finally:
+        await orch.forge.aclose()
+        await orch.claimer.aclose()
+        await orch.store.close()
 
 
 async def _selfcheck(ticker: str, chain: str | None, live_approval: bool) -> int:

@@ -42,8 +42,10 @@ CLI:
 | `stockforge run` | start the async orchestrator loop (default) |
 | `stockforge status` | print config + today's launch budget |
 | `stockforge doctor` | fail-closed readiness check (auth, connectivity, Telegram, budget) |
+| `stockforge preflight` | pre-live checklist — "are you ready to flip dry-run off?" (fail-closed) |
 | `stockforge selfcheck [TICKER] [--chain] [--live-approval]` | run a full **dry-run** pipeline end to end |
 | `stockforge preview <TICKER> [--chain]` | forge a concept + show the exact Bankr request, no broadcast |
+| `stockforge launch <TICKER> [--chain]` | **one** controlled launch — respects dry-run + Telegram approval |
 | `stockforge fees <0xtoken>` | read fees for a token (public, no auth) |
 
 ## Architecture
@@ -126,6 +128,34 @@ Run `stockforge doctor` (must exit 0, no ❌) and confirm the checklist in
 real Bankr auth, beneficiary set, Telegram `getMe`/`getChat` passing,
 `DAILY_LAUNCH_BUDGET=1`, a dedicated funded hot wallet, and a
 `selfcheck --live-approval` where the buttons actually worked.
+
+## Path to First Live Launch
+
+Follow this in order. **Dry-run stays ON the entire time until the last step.**
+
+1. **Readiness.** `stockforge doctor` (config sanity) and `stockforge preflight`
+   (live prerequisites). `preflight` exits non-zero and prints
+   `⛔ NOT READY FOR LIVE` until every critical item is green — by design.
+2. **Manually verify stock-pairing on Bankr yourself.** Do one real paired launch
+   through Bankr's own UI/CLI and confirm the pool is quoted in the stock. This is
+   the only way to close the `pair_status` unknown — StockForge cannot verify the
+   pairing contract for you.
+3. **Fill real `.env`, keep `STOCKFORGE_DRY_RUN=true`.** Set `BANKR_API_KEY`,
+   `BANKR_BENEFICIARY_ADDRESS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Use a
+   dedicated, minimally-funded hot wallet — never a main key.
+4. **Test the full pipeline + approvals in dry-run.**
+   `stockforge selfcheck --live-approval` (buttons must work), then
+   `stockforge launch NVDA --chain robinhood` for a single dry-run launch and
+   confirm the `launch_record` JSON line looks right.
+5. **Only then** set `STOCKFORGE_DAILY_LAUNCH_BUDGET=1`, flip
+   `STOCKFORGE_DRY_RUN=false`, and do ONE controlled launch with
+   `stockforge launch <TICKER>` — it will require a Telegram approval tap before
+   anything broadcasts.
+
+Every launch attempt (dry-run included) emits a secret-free `launch_record` JSON
+line to stdout and is persisted to SQLite: timestamp, name, ticker, requested
+pair, final mode (stock-pair / standard), dry-run flag, approval status, and a
+Bankr response summary.
 
 ## Deploy (Zeabur / Docker)
 
