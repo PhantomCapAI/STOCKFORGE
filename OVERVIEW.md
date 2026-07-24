@@ -83,17 +83,34 @@ lets sweeps collect fees on their own once they clear `STOCKFORGE_FEE_CLAIM_MIN_
 Autonomous on-chain claiming needs `BANKR_PRIVATE_KEY` (a minimally-funded hot
 wallet); without it, claims are built as unsigned txs for you to sign.
 
+## The official Bankr loop (what this implements)
+
+    Agent wallet → launch token → trading fees (95% creator split)
+                 → claim fees → pay for compute (LLM Gateway) → keep running
+
+StockForge is a **continuous, autonomous-capable fee-earning engine** on Bankr,
+optimized to capture creator swap fees **within Bankr's account limits** and
+consolidate them into one treasury. Stock-paired tokens on Robinhood Chain are
+the highest-velocity fee source, so they're preferred (and degrade safely to a
+standard WETH pool when the pairing is unsupported).
+
 ## Intended expansion path
 
 1. **Continuous stock-paired launches** — where we are now: one engine, one
-   treasury, launching + claiming non-stop within limits. Stock-pairing prefers
-   Robinhood Chain and degrades safely to a standard pool when unverified.
+   treasury, launching + claiming non-stop within the daily budget + 1/min limit.
 2. **Fee consolidation into treasury** — all creator fees flow to one address;
-   claim records are logged + persisted for accounting.
-3. **Later: multiple agent wallets + x402 surfaces** — several Bankr-native
-   agents, each with its own wallet, consolidating into the treasury, with x402
-   payment surfaces on top. The single-engine code is structured so this is an
-   additive step (more launchers/beneficiaries), not a rewrite. **Not built yet.**
+   every claim is logged + persisted (`claims` table, secret-free `claim_record`).
+3. **Fees → compute (Bankr LLM Gateway)** — `FORGE_LLM_PROVIDER=bankr` funds the
+   agent's own concept-generation compute from its fees (`llm.bankr.bot`).
+   Foundation is present; auto credit top-up stays a deliberate human step.
+4. **Later: x402 paid endpoints** — a second revenue stream (charge for the
+   agent's outputs via x402). Seam only — **not built yet.**
+
+**Scope boundary.** This runs as ONE Bankr account inside the platform's caps
+(50/100 per day, 1/min, anti-sybil wallet-age gate, spam detection). Fee routing
+to multiple treasuries within one account is fine; multi-*account* machinery to
+exceed Bankr's caps is sybil behavior that gets accounts banned — not built and
+not supported. Anti-slop + the "not affiliated" disclaimer stay on.
 
 See [`README.md`](README.md) for full detail and [`CLAUDE.md`](CLAUDE.md) for the
 go-live checklist. **Do not turn off dry-run** until that checklist is fully green.

@@ -155,6 +155,27 @@ async def _check_rate_state(settings: Settings) -> Check:
         return Check("rate limiter / budget", "warn", f"state unavailable: {e}")
 
 
+def _check_llm_gateway(settings: Settings) -> Check:
+    """fees -> compute funding via the Bankr LLM Gateway (optional, informational)."""
+    if settings.forge_llm_provider == "bankr":
+        if settings.llm_gateway_key:
+            return Check(
+                "fees->compute (LLM gateway)",
+                "ok",
+                f"Bankr gateway configured ({settings.bankr_llm_base}); fund via `bankr llm credits add`",
+            )
+        return Check(
+            "fees->compute (LLM gateway)",
+            "warn",
+            "FORGE_LLM_PROVIDER=bankr but no BANKR_LLM_KEY/BANKR_API_KEY",
+        )
+    return Check(
+        "fees->compute (LLM gateway)",
+        "ok",
+        "off (set FORGE_LLM_PROVIDER=bankr to route concept compute through Bankr fees)",
+    )
+
+
 def _check_env(settings: Settings) -> list[Check]:
     checks: list[Check] = []
     checks.append(
@@ -199,6 +220,7 @@ async def run_doctor(settings: Settings) -> tuple[list[Check], bool]:
     checks += cli_checks
     checks += tg_checks
     checks.append(rate_check)
+    checks.append(_check_llm_gateway(settings))
 
     # Fail-closed policy: a hard fail if any check is 'fail'. Live configs surface
     # missing guardrails as 'fail' inside the individual checks above.
@@ -272,7 +294,9 @@ async def run_preflight(settings: Settings) -> tuple[list[Check], bool]:
             "(requires BANKR_BACKEND=rest + chain=robinhood)",
         )
     )
-    # 9. Missing critical env vars.
+    # 9. fees -> compute funding (optional, informational).
+    checks.append(_check_llm_gateway(settings))
+    # 10. Missing critical env vars.
     missing = _missing_live_env(settings)
     checks.append(
         Check(

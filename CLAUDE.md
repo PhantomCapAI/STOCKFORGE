@@ -139,11 +139,30 @@ autonomous it is — both default safe:
 secret-free `claim_record` (both JSON to stdout + persisted: `launches`/`claims`
 tables). Per-tick heartbeat logs budget remaining, circuit state, and mode.
 
+**Fees → compute (self-funding loop).** `FORGE_LLM_PROVIDER=bankr` points the
+concept forge at the **Bankr LLM Gateway** (`llm.bankr.bot`, verified,
+OpenAI-compatible, `X-API-Key`), so the agent's own trading fees pay for its
+compute — the official Bankr loop: wallet → launch → fees → claim → pay compute →
+keep running. LLM credits are USD, separate from the trading wallet; top up on a
+funded account (`bankr llm credits add` / `... auto`). `compute.py` centralizes
+this; it does **not** auto-buy credits (deliberate human step — real spend).
+`stockforge treasury` / `/treasury` show extracted fees + funding status.
+
 **Intended expansion path** (documented in OVERVIEW.md — do not over-build):
 1. Continuous stock-paired launches (current single engine).
 2. Fee consolidation into one treasury (current).
-3. Later: multiple agent wallets + x402 surfaces — additive (more
-   launchers/beneficiaries), not a rewrite. Not built yet.
+3. Fees → compute via the Bankr LLM Gateway (foundation present; auto-topup stays
+   a human-enabled step).
+4. Later: x402 paid endpoints as a second revenue stream (seam only, not built).
+
+**Boundary — no sybil / limit evasion.** Bankr enforces per-account daily caps
+(50/100), 1/min, an anti-sybil wallet-age gate, and spam detection that restricts
+accounts. The engine runs as ONE account within those limits. `LaunchRequest.fee_recipient`
+already allows routing fees to different treasuries *within one account* (benign
+organization). Do NOT build multi-account/multi-wallet machinery whose purpose is
+to multiply past those caps — that's ToS-violating sybil behavior and gets
+accounts banned. Keep the anti-slop checks and the "not affiliated with <TICKER>"
+disclaimer — they are anti-spam / anti-deception rails, not optional.
 
 ## Hard rules (safety > features)
 

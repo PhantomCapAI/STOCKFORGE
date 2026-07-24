@@ -407,6 +407,7 @@ class Orchestrator:
         self.tg.register("status", self._cmd_status)
         self.tg.register("launch", self._cmd_launch)
         self.tg.register("claim", self._cmd_claim)
+        self.tg.register("treasury", self._cmd_treasury)
         self.tg.register("pause", self._cmd_pause)
         self.tg.register("resume", self._cmd_resume)
 
@@ -416,6 +417,7 @@ class Orchestrator:
             "/status — health, budget, circuit\n"
             "/launch <TICKER> [headline] — queue a manual candidate\n"
             "/claim — sweep + claim fees now\n"
+            "/treasury — extracted fees + compute funding\n"
             "/pause — halt the pipeline\n"
             "/resume — resume the pipeline"
         )
@@ -448,6 +450,28 @@ class Orchestrator:
     async def _cmd_claim(self, _: str) -> str:
         await self._fee_sweep()
         return "fee sweep triggered"
+
+    async def _cmd_treasury(self, _: str) -> str:
+        s = await self.store.claim_summary()
+        line = (
+            f"Treasury {self.settings.treasury or 'unset'}\n"
+            f"claims: {s['claim_successes']}/{s['claim_attempts']} ok, "
+            f"{s['weth_claimed_recorded']:.6f} WETH recorded\n"
+            f"auto_claim={self.settings.auto_claim} min={self.settings.fee_claim_min_weth}"
+        )
+        if self.settings.treasury:
+            try:
+                async with FeeReader(self.settings.bankr_api_base) as reader:
+                    totals = await reader.creator_totals(self.settings.treasury)
+                if totals:
+                    line += (
+                        f"\nBankr: lifetime {totals.get('lifetime_weth', 0)} / "
+                        f"claimable {totals.get('claimable_weth', 0)} WETH "
+                        f"({totals.get('token_count', 0)} tokens)"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+        return line
 
     async def _cmd_pause(self, _: str) -> str:
         self._paused = True

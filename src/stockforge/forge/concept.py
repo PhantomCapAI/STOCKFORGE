@@ -44,8 +44,17 @@ class ConceptForge:
         self.antislop = antislop or AntiSlop()
         self._client: httpx.AsyncClient | None = None
 
+    def _llm_enabled(self) -> bool:
+        """True when a real LLM provider is configured with a usable key."""
+        provider = self.settings.forge_llm_provider
+        if provider == "openai_compatible":
+            return bool(self.settings.forge_llm_api_key)
+        if provider == "bankr":  # fees -> compute via the Bankr LLM Gateway
+            return bool(self.settings.llm_gateway_key)
+        return False
+
     async def forge(self, signal: Signal, recent_slugs: list[str] | None = None) -> Concept | None:
-        if self.settings.forge_llm_provider == "openai_compatible" and self.settings.forge_llm_api_key:
+        if self._llm_enabled():
             concept = await self._forge_llm(signal)
         else:
             concept = self._forge_template(signal)
@@ -98,14 +107,20 @@ class ConceptForge:
             f"Sources: {', '.join(signal.sources)}\n\n"
             "Return ONLY the JSON object."
         )
+        base_url, api_key, model, auth_style = self.settings.forge_effective()
+        headers = (
+            {"X-API-Key": api_key}
+            if auth_style == "x-api-key"
+            else {"Authorization": f"Bearer {api_key}"}
+        )
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=60.0)
         try:
             r = await self._client.post(
-                f"{self.settings.forge_llm_base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {self.settings.forge_llm_api_key}"},
+                f"{base_url.rstrip('/')}/chat/completions",
+                headers=headers,
                 json={
-                    "model": self.settings.forge_llm_model,
+                    "model": model,
                     "messages": [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": user},

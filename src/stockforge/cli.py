@@ -7,6 +7,7 @@
   stockforge selfcheck [NVDA]    # run a full DRY-RUN pipeline end to end
   stockforge launch NVDA         # one controlled launch (respects dry-run + approval)
   stockforge fees <0xtoken>      # read fees for a token (public, no auth)
+  stockforge treasury            # extracted fees + fees->compute funding status
   stockforge doctor              # environment / readiness check (fail-closed)
   stockforge preflight           # pre-live readiness checklist (fail-closed)
 
@@ -47,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="print config + launch budget")
     sub.add_parser("doctor", help="check environment readiness (fail-closed)")
     sub.add_parser("preflight", help="pre-live readiness checklist (fail-closed)")
+    sub.add_parser("treasury", help="show extracted fees + compute-funding status")
     p_prev = sub.add_parser("preview", help="forge + preview a launch (no broadcast)")
     p_prev.add_argument("ticker")
     p_prev.add_argument("--chain", default=None, choices=["base", "robinhood"])
@@ -78,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_doctor())
         if cmd == "preflight":
             return asyncio.run(_preflight())
+        if cmd == "treasury":
+            return asyncio.run(_treasury())
         if cmd == "preview":
             return asyncio.run(_preview(args.ticker, args.chain))
         if cmd == "launch":
@@ -146,6 +150,53 @@ async def _doctor() -> int:
         print("  RESULT:  ❌ NOT READY — resolve the ❌ items above before running live")
     print(_BAR)
     return 0 if ok else 1
+
+
+async def _treasury() -> int:
+    """Extraction view: fees claimed (local audit trail + Bankr's own totals) and
+    how compute funding is wired. Read-only, no secrets, no spend."""
+    from .compute import compute_funding_status
+    from .db import Store
+    from .fees import FeeReader
+
+    _quiet_logs()
+    settings = get_settings()
+    print("== StockForge treasury / extraction ==")
+    print(f"  treasury address : {settings.treasury or 'UNSET (set STOCKFORGE_TREASURY_ADDRESS or beneficiary)'}")
+    print(f"  auto_claim       : {settings.auto_claim}   min_claim_weth={settings.fee_claim_min_weth}")
+
+    store = Store(settings.db_path)
+    await store.connect()
+    summary = await store.claim_summary()
+    await store.close()
+    print("  -- local claim audit trail --")
+    print(f"  claim attempts   : {summary['claim_attempts']}  successes={summary['claim_successes']}")
+    print(f"  WETH claimed (recorded): {summary['weth_claimed_recorded']:.6f}")
+    if summary["last_claim"]:
+        lc = summary["last_claim"]
+        print(f"  last claim       : {lc['at']} [{lc['mode']}] ok={lc['ok']} {lc['weth']:.6f} WETH")
+
+    if settings.treasury:
+        try:
+            async with FeeReader(settings.bankr_api_base) as reader:
+                totals = await reader.creator_totals(settings.treasury)
+            print("  -- Bankr creator-fees (authoritative) --")
+            if totals:
+                print(f"  lifetime WETH    : {totals.get('lifetime_weth', 0)}")
+                print(f"  claimable WETH   : {totals.get('claimable_weth', 0)}")
+                print(f"  claimed WETH     : {totals.get('claimed_weth', 0)}")
+                print(f"  tokens           : {totals.get('token_count', 0)}")
+            else:
+                print("  (no data / endpoint unreachable from here)")
+        except Exception as e:  # noqa: BLE001
+            print(f"  (creator-fees read failed: {e})")
+
+    cf = compute_funding_status(settings)
+    print("  -- fees -> compute (Bankr LLM Gateway) --")
+    print(f"  loop        : {cf['loop']}")
+    print(f"  llm_gateway : {cf['llm_gateway']}")
+    print(f"  top up      : {cf['commands']['top_up']}  |  auto: {cf['commands']['auto_top_up']}")
+    return 0
 
 
 async def _preflight() -> int:

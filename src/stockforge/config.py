@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     bankr_cli_bin: str = Field(default="bankr", alias="BANKR_CLI_BIN")
     bankr_private_key: str = Field(default="", alias="BANKR_PRIVATE_KEY")
     bankr_beneficiary_address: str = Field(default="", alias="BANKR_BENEFICIARY_ADDRESS")
+    # Bankr LLM Gateway (verified: https://llm.bankr.bot, OpenAI-compatible at
+    # /v1/chat/completions, X-API-Key or Bearer). This is how fees pay for compute.
+    # Separate LLM key is optional — falls back to BANKR_API_KEY. Beta-gated.
+    bankr_llm_key: str = Field(default="", alias="BANKR_LLM_KEY")
+    bankr_llm_base: str = Field(default="https://llm.bankr.bot/v1", alias="BANKR_LLM_BASE")
 
     # ---- Launch policy -------------------------------------------------------
     default_chain: Chain = Field(default="base", alias="STOCKFORGE_DEFAULT_CHAIN")
@@ -62,7 +67,12 @@ class Settings(BaseSettings):
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
 
     # ---- Concept forge -------------------------------------------------------
-    forge_llm_provider: Literal["none", "openai_compatible"] = Field(
+    # "none" = deterministic template (no external calls).
+    # "openai_compatible" = any OpenAI-style endpoint (FORGE_LLM_* below).
+    # "bankr" = the Bankr LLM Gateway (llm.bankr.bot) — closes the fees->compute
+    #           loop: the agent's own trading fees pay for its concept-generation
+    #           compute. Uses BANKR_LLM_KEY (or BANKR_API_KEY).
+    forge_llm_provider: Literal["none", "openai_compatible", "bankr"] = Field(
         default="none", alias="FORGE_LLM_PROVIDER"
     )
     forge_llm_base_url: str = Field(
@@ -105,6 +115,23 @@ class Settings(BaseSettings):
         not dry-run). The kill switch, budget, and rate limits still apply."""
         return not self.require_approval and not self.dry_run
 
+    @property
+    def llm_gateway_key(self) -> str:
+        """Key for the Bankr LLM Gateway — dedicated LLM key, else the API key."""
+        return self.bankr_llm_key or self.bankr_api_key
+
+    @property
+    def llm_gateway_configured(self) -> bool:
+        return self.forge_llm_provider == "bankr" and bool(self.llm_gateway_key)
+
+    def forge_effective(self) -> tuple[str, str, str, str]:
+        """Resolve (base_url, api_key, model, auth_style) for the active LLM
+        provider. auth_style is 'x-api-key' for the Bankr Gateway (bk_ keys) and
+        'bearer' for generic OpenAI-compatible endpoints."""
+        if self.forge_llm_provider == "bankr":
+            return (self.bankr_llm_base, self.llm_gateway_key, self.forge_llm_model, "x-api-key")
+        return (self.forge_llm_base_url, self.forge_llm_api_key, self.forge_llm_model, "bearer")
+
     def redacted(self) -> dict:
         """Config snapshot safe to log — secrets masked."""
 
@@ -128,6 +155,8 @@ class Settings(BaseSettings):
             "min_attention_score": self.min_attention_score,
             "telegram_enabled": self.telegram_enabled,
             "forge_llm_provider": self.forge_llm_provider,
+            "llm_gateway": "configured" if self.llm_gateway_configured else "off",
+            "bankr_llm_key": mask(self.bankr_llm_key),
             "news_source": self.news_source_enabled,
             "watchlist": self.watchlist,
         }

@@ -160,6 +160,32 @@ class Store:
         )
         await self.db.commit()
 
+    async def claim_summary(self) -> dict[str, Any]:
+        """Local record of extraction activity: how many claims, how many
+        succeeded, and the WETH those successful claims covered (as reported at
+        claim time). Authoritative claimed totals come from Bankr's creator-fees
+        endpoint; this is the agent's own audit trail."""
+        cur = await self.db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(ok),0), "
+            "COALESCE(SUM(CASE WHEN ok=1 THEN claimable_weth ELSE 0 END),0) FROM claims"
+        )
+        row = await cur.fetchone()
+        total, ok_count, weth = (row[0], row[1], row[2]) if row else (0, 0, 0.0)
+        cur2 = await self.db.execute(
+            "SELECT at, mode, ok, claimable_weth FROM claims ORDER BY at DESC LIMIT 1"
+        )
+        last = await cur2.fetchone()
+        return {
+            "claim_attempts": int(total),
+            "claim_successes": int(ok_count),
+            "weth_claimed_recorded": float(weth),
+            "last_claim": (
+                {"at": last[0], "mode": last[1], "ok": bool(last[2]), "weth": last[3]}
+                if last
+                else None
+            ),
+        }
+
     # ---- approvals -----------------------------------------------------------
     async def save_approval(self, a: Approval) -> None:
         await self.db.execute(

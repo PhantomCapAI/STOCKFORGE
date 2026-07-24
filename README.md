@@ -189,6 +189,43 @@ minimally-funded hot wallet); without it, claims are built as unsigned txs to si
 > [Path to First Live Launch](#path-to-first-live-launch) in dry-run first, then
 > flip `STOCKFORGE_REQUIRE_APPROVAL=false` with a small budget.
 
+### Aggressive continuous mode (within Bankr's limits)
+
+Once verified, this `.env` runs the engine hard while still respecting every
+hard rail. It maximizes fee capture **within a single Bankr account's caps** —
+it does not, and must not, try to exceed them (Bankr restricts accounts for
+high-volume/sybil deploys).
+
+```bash
+STOCKFORGE_DRY_RUN=false               # you flip this — never the agent
+STOCKFORGE_REQUIRE_APPROVAL=false      # autonomous, no Telegram tap
+STOCKFORGE_NEWS_SOURCE=true            # real attention drives launches
+STOCKFORGE_DEFAULT_CHAIN=robinhood     # prefer stock-paired (UNVERIFIED, degrades safely)
+BANKR_BACKEND=rest                     # only rest can request a stock pair
+STOCKFORGE_DAILY_LAUNCH_BUDGET=50      # <= Bankr's 50/day (100 for Club); still 1/min
+STOCKFORGE_MIN_ATTENTION_SCORE=60      # lower = more launches (more marginal quality)
+STOCKFORGE_TICK_SECONDS=60             # 1 tick/min matches the 1/min launch limit
+STOCKFORGE_AUTO_CLAIM=true             # consolidate fees to the treasury automatically
+BANKR_PRIVATE_KEY=0x...                # hot wallet — required for autonomous claiming
+STOCKFORGE_TREASURY_ADDRESS=0x...      # where all fees land
+# Optional: fees pay for the agent's own compute
+FORGE_LLM_PROVIDER=bankr               # concept generation via the Bankr LLM Gateway
+```
+
+The `/pause` Telegram kill switch, daily budget, 1/min + 50/100-day caps, and the
+circuit breaker all still apply. Track extracted value with `stockforge treasury`
+or `/treasury`.
+
+### Fees → compute (self-funding loop)
+
+`FORGE_LLM_PROVIDER=bankr` routes the concept forge through the **Bankr LLM
+Gateway** (`llm.bankr.bot`, OpenAI-compatible), so trading fees fund the agent's
+own compute — Bankr's official loop: *wallet → launch → fees → claim → pay for
+compute → keep running*. LLM credits are USD and separate from the trading
+wallet; top up on a funded account (`bankr llm credits add 25`, or
+`bankr llm credits auto --enable`). StockForge never auto-buys credits — that
+stays a deliberate human step.
+
 ## Deploy (Zeabur / Docker)
 
 ```bash
