@@ -37,18 +37,47 @@ bankr --ni launch --name "Silicon NVDA" --symbol SILNV --simulate
 - `--simulate` builds the tx without broadcasting — StockForge maps `dry_run`
   onto this.
 
-## Stock-pairing (NVDA/GME) — ⚠️ UNVERIFIED
-Bankr's documented pools pair the new token against **WETH** on a Uniswap V4
-pool (fee reads show `token0Label: WETH`). A first-class "pair against NVDA"
-parameter is **not documented** in the public docs we verified. StockForge
-therefore:
-- Only sets `pair_with` when `chain=robinhood`.
-- Passes the pairing as a natural-language hint ("... paired with NVDA") and an
-  explicit `LaunchRequest.pair_with` field.
-- Degrades gracefully to standard WETH pairing if Bankr ignores the hint.
+## Stock-pairing (NVDA/GME/TSLA) — ⚠️ live on Bankr, contract still soft
+Stock-paired launches are **live on Bankr today** — pools quoted in the stock
+(NVDA/GME/TSLA…) on **Robinhood Chain**. But the exact public API/CLI parameter
+is **not documented**, so StockForge expresses it as intent and classifies the
+outcome honestly rather than assuming success.
 
-**Before relying on stock-pairing in production, confirm the capability with
-Bankr support / current docs and wire the exact parameter here.**
+**Best-known phrasing (Agent API / `bankr agent` NL prompt), used today:**
+```
+deploy a token called "Silicon NVDA" with symbol SILNV paired with NVDA on robinhood chain
+```
+(see `stock_pair_phrase()` and `build_launch_prompt()` in `launcher/`.)
+
+**CLI limitation — do NOT fake a flag.** The verified `bankr launch` flags are
+`--name --symbol --chain --image --tweet --website --fee --fee-type
+--no-vesting --simulate --yes`. There is **no pairing flag**. So the CLI backend
+*cannot* request stock-pairing — only `BANKR_BACKEND=rest` (the Agent/NL path)
+can. `CLI_SUPPORTS_STOCK_PAIR=False` in `launcher/pairing.py` enforces this; the
+launcher logs a warning and the preview shows a note when a pair is requested on
+the CLI backend.
+
+**Outcome classification** (`launcher/pairing.py::classify_pairing`, best-effort
+from the launch/job response labels):
+
+| `pair_status` | Meaning |
+|---|---|
+| `not_requested` | standard (WETH) launch, no stock pair asked for |
+| `requested` | asked for, **not yet verifiable** (dry-run, pending job, or no pool labels) |
+| `accepted` | response shows the pool quoted in the requested stock |
+| `degraded` | launched, but pool quoted in a standard asset (WETH/ETH/USDC…) instead |
+| `rejected` | launch failed / no token produced |
+
+Safe degradation is preserved: if Bankr doesn't honor the pairing, the token
+still launches against a standard pool and we report `degraded` (never a silent
+false "accepted").
+
+**Remaining uncertainty (needs a human + a real launch to close):**
+- The exact field/verb Bankr's agent expects for pairing (we use NL phrasing).
+- Which response field carries the pool quote label on a stock-paired launch —
+  `find_quote_labels()` scans common keys (`token0Label`, `quoteSymbol`,
+  `pairedAsset`, …); confirm the real key from one live launch and tighten it.
+- Whether a structured (non-NL) deploy/pairing endpoint exists for partners.
 
 ## Limits (enforced by `LaunchRateLimiter`)
 - Standard: **50 deploys / 24h**; Bankr Club: **100 / 24h**.

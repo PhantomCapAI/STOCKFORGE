@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from ..models import LaunchRequest, LaunchResult
+from .pairing import stock_pair_phrase
 
 
 class LaunchBackend(Protocol):
@@ -20,16 +21,22 @@ class LaunchBackend(Protocol):
 def build_launch_prompt(req: LaunchRequest) -> str:
     """Natural-language deploy instruction for the Agent API / `bankr agent`.
 
-    Bankr accepts free-form deploy prompts. We include the stock-pairing intent
-    in-line. NOTE: stock-pairing (pairing against NVDA/GME rather than WETH) is
-    NOT documented as a first-class Bankr parameter — it is passed as a hint so
-    that IF Bankr's Robinhood Chain supports it, the request expresses it, while
-    on Base it degrades gracefully to a standard WETH-paired launch.
+    Bankr accepts free-form deploy prompts. The verified base form is
+    "deploy a token called X with symbol Y on <chain>". When a stock pair is
+    requested we express it in the phrasing Bankr's agent understands today, e.g.
+    '... paired with NVDA on robinhood chain'.
+
+    NOTE: stock-pairing is NOT a documented first-class Bankr parameter. It is
+    expressed as intent; if Bankr's Robinhood Chain honors it the pool is quoted
+    in the stock, otherwise the launch degrades to a standard (WETH) pool. The
+    outcome is classified after the fact (see pairing.classify_pairing).
     """
     parts = [f'deploy a token called "{req.name}" with symbol {req.symbol}']
-    parts.append(f"on {req.chain}")
+    # Chain + pairing are expressed together so the intent reads naturally.
     if req.pair_with:
-        parts.append(f"paired with {req.pair_with.upper()}")
+        parts.append(stock_pair_phrase(req.pair_with, req.chain))
+    else:
+        parts.append(f"on {req.chain}")
     if req.image_url:
         parts.append(f"image {req.image_url}")
     if req.website:

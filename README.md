@@ -41,7 +41,8 @@ CLI:
 |---|---|
 | `stockforge run` | start the async orchestrator loop (default) |
 | `stockforge status` | print config + today's launch budget |
-| `stockforge doctor` | environment / readiness check |
+| `stockforge doctor` | fail-closed readiness check (auth, connectivity, Telegram, budget) |
+| `stockforge selfcheck [TICKER] [--chain] [--live-approval]` | run a full **dry-run** pipeline end to end |
 | `stockforge preview <TICKER> [--chain]` | forge a concept + show the exact Bankr request, no broadcast |
 | `stockforge fees <0xtoken>` | read fees for a token (public, no auth) |
 
@@ -85,11 +86,46 @@ See [`skills/bankr-launch.md`](skills/bankr-launch.md) for the full contract.
    brief assumed it; the actual launch path is `POST /agent/prompt` (natural
    language) or the CLI. StockForge builds against the real endpoints and keeps
    `BANKR_API_BASE` / paths env-configurable.
-2. **Stock-pairing (pairing a token against NVDA/GME) is UNVERIFIED.** Bankr's
-   documented pools pair against **WETH** on Uniswap V4. A first-class
-   "pair-against-a-stock" parameter is not in the public docs. StockForge passes
-   the pairing as an intent (only on `--chain robinhood`) and degrades to
-   standard WETH pairing otherwise. **Confirm with Bankr before relying on it.**
+2. **Stock-pairing is live on Bankr but its API/CLI contract is soft.** Pools
+   quoted in the stock (NVDA/GME/TSLA) exist today on **Robinhood Chain**, but no
+   documented parameter exposes it. StockForge expresses the pair via the Agent
+   NL prompt (`… paired with NVDA on robinhood chain`), **only on the `rest`
+   backend** (the `bankr launch` CLI has no pairing flag — we do not invent one),
+   and **classifies the outcome** rather than assuming it worked:
+
+   | `pair_status` | meaning |
+   |---|---|
+   | `accepted` | pool is quoted in the requested stock |
+   | `degraded` | launched, but paired standard (WETH) instead |
+   | `rejected` | launch failed |
+   | `requested` | asked for, not yet verifiable (dry-run / pending) |
+   | `not_requested` | standard launch |
+
+### Verify a stock-paired launch manually
+
+```bash
+# 1. Preview the exact prompt (no broadcast):
+stockforge preview NVDA --chain robinhood
+#    -> prompt: deploy a token called "…" with symbol … paired with NVDA on robinhood chain
+
+# 2. Full dry-run pipeline incl. pairing classification + approval flow:
+stockforge selfcheck NVDA --chain robinhood --live-approval
+
+# 3. After a REAL launch (dry-run off, rest backend, robinhood chain), confirm
+#    the launcher logged  pair_status=accepted  and read the pool back:
+stockforge fees <0xtoken>     # token0Label/token1Label should show the stock
+```
+If `pair_status` comes back `degraded`, Bankr didn't honor the pairing — the
+token still launched against a standard pool (safe degradation), so treat it as
+a WETH launch and open a Bankr support ticket to confirm the pairing contract.
+
+### Before you turn off dry-run
+
+Run `stockforge doctor` (must exit 0, no ❌) and confirm the checklist in
+[`CLAUDE.md`](CLAUDE.md#do-not-turn-off-dry-run-until-all-of-these-are-true):
+real Bankr auth, beneficiary set, Telegram `getMe`/`getChat` passing,
+`DAILY_LAUNCH_BUDGET=1`, a dedicated funded hot wallet, and a
+`selfcheck --live-approval` where the buttons actually worked.
 
 ## Deploy (Zeabur / Docker)
 

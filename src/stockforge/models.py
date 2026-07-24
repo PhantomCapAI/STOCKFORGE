@@ -62,6 +62,20 @@ class LaunchStatus(str, Enum):
     SIMULATED = "simulated"  # dry-run / --simulate
 
 
+class PairStatus(str, Enum):
+    """Outcome of a stock-pairing intent (pool quoted in NVDA/GME/... vs WETH).
+
+    Bankr does not publicly document a first-class pairing parameter, so this is
+    inferred from the launch response, best-effort and honest:
+    """
+
+    NOT_REQUESTED = "not_requested"  # standard (WETH) launch — no stock pair asked for
+    REQUESTED = "requested"  # asked for, outcome not yet verifiable (dry-run / pending job)
+    ACCEPTED = "accepted"  # evidence the pool is quoted in the requested stock
+    DEGRADED = "degraded"  # launched, but paired standard (WETH) instead of the stock
+    REJECTED = "rejected"  # launch failed / pairing not honored and no token produced
+
+
 class LaunchRequest(BaseModel):
     """Everything Bankr needs to deploy. `pair_with` is the stock-pairing intent."""
 
@@ -93,6 +107,9 @@ class LaunchResult(BaseModel):
     tx_hash: str = ""
     pool_url: str = ""
     job_id: str = ""  # Bankr async job id (REST backend)
+    pair_requested: str = ""  # the stock ticker we asked to pair against ("" = none)
+    pair_status: PairStatus = PairStatus.NOT_REQUESTED
+    quote_labels: list[str] = Field(default_factory=list)  # pool quote assets seen in the response
     raw: dict[str, Any] = Field(default_factory=dict)
     error: str = ""
     finished_at: float = Field(default_factory=_now)

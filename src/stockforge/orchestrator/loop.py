@@ -180,10 +180,20 @@ class Orchestrator:
         await self.rate.record()
         result = await self.launcher.launch(req)
         await self.store.save_launch(req, result)
-        log.info("launch %s -> %s %s", req.symbol, result.status.value, result.token_address)
+        log.info(
+            "launch %s -> %s pair=%s %s",
+            req.symbol,
+            result.status.value,
+            result.pair_status.value,
+            result.token_address,
+        )
+        pair_line = ""
+        if result.pair_requested:
+            pair_line = f"\npair {result.pair_requested.upper()}: {result.pair_status.value}"
         await self.tg.send(
             f"{'✅' if result.status not in (LaunchStatus.FAILED,) else '❌'} "
             f"${req.symbol} {result.status.value} {result.token_address or result.error}"
+            f"{pair_line}"
         )
         if result.status in (LaunchStatus.CONFIRMED, LaunchStatus.SUBMITTED, LaunchStatus.SIMULATED):
             if self.promoter:

@@ -40,13 +40,47 @@ own compute. Async Python, SQLite state, Telegram human-in-the-loop.
 **Assumed / UNVERIFIED — flag, never fabricate:**
 - ❌ `POST /token-launches/deploy` (from the original brief) is **not** a real
   Bankr endpoint. Do not "restore" it. Real path = `/agent/prompt` or CLI.
-- ⚠️ **Stock-pairing** (pool paired with NVDA/GME instead of WETH) is **not
-  documented**. It's passed as a natural-language + field intent, only on
-  Robinhood Chain, and degrades to WETH pairing. Before claiming it works,
-  confirm with Bankr and wire the exact parameter in `launcher/base.py`.
+- ⚠️ **Stock-pairing** (pool quoted in NVDA/GME/TSLA instead of WETH) is **live
+  on Bankr** but has **no documented API/CLI parameter**. StockForge:
+  - Expresses it via the NL prompt only, and only when `chain=robinhood`:
+    `deploy a token called "X" with symbol Y paired with NVDA on robinhood chain`
+    (`launcher/pairing.py::stock_pair_phrase`).
+  - The **CLI has no pairing flag** — `CLI_SUPPORTS_STOCK_PAIR=False`; do NOT
+    invent `--pair`. Only `BANKR_BACKEND=rest` can request a pair.
+  - Classifies the outcome honestly from the response
+    (`classify_pairing`): `not_requested | requested | accepted | degraded |
+    rejected`. `requested` = asked but unverifiable (dry-run / pending); never a
+    false "accepted". Degrades safely to a standard pool.
+  - TODO for a human: confirm the exact pairing verb + the response label key
+    from one real launch, then tighten `find_quote_labels`.
 - ⚠️ The Agent API **job-polling path** isn't fully specified publicly. The REST
   backend tries `/agent/job/{id}`, treats 404 as "leave SUBMITTED", and never
   fabricates a token address.
+
+## Verify before going live
+
+- `stockforge doctor` — fail-closed readiness check: dry-run flag, Bankr auth +
+  reachability, CLI installed/authenticated (`bankr whoami`), Telegram token +
+  chat reachability (`getMe`/`getChat`), rate-limiter/budget state. Exits
+  non-zero on any ❌.
+- `stockforge selfcheck [TICKER] [--chain robinhood] [--live-approval]` — runs a
+  full **dry-run** pipeline (signal → concept → launch(sim) → fee check →
+  approval flow) so a human can verify everything without spending a launch.
+  Refuses to run if `dry_run=false`.
+
+## DO NOT turn off dry-run until ALL of these are true
+
+1. `stockforge doctor` exits 0 with **no ❌** in the intended live config.
+2. `BANKR_API_KEY` (rest) or `bankr whoami` (cli) works — auth is real.
+3. `BANKR_BENEFICIARY_ADDRESS` set (so fees can be read/claimed).
+4. Telegram `getMe` + `getChat` both pass (approvals can actually reach a human;
+   otherwise every real action is denied, fail-closed).
+5. `STOCKFORGE_DAILY_LAUNCH_BUDGET` starts small (1).
+6. A dedicated, minimally-funded hot wallet — never a main key.
+7. You ran `stockforge selfcheck --live-approval` and the Approve/Reject buttons
+   worked in Telegram.
+8. For stock-pairing specifically: `BANKR_BACKEND=rest` and `chain=robinhood`;
+   confirm one launch reports `pair_status=accepted` before trusting it.
 
 ## Hard rules (safety > features)
 
