@@ -90,7 +90,21 @@ class Settings(BaseSettings):
     news_source_enabled: bool = Field(default=False, alias="STOCKFORGE_NEWS_SOURCE")
     news_freshness_hours: int = Field(default=24, alias="STOCKFORGE_NEWS_FRESHNESS_HOURS")
 
-    @field_validator("default_chain", "bankr_backend", "forge_llm_provider", mode="before")
+    # Elon-tweet source: propose a launch when a tweet resolves a ticker AND hits
+    # an engagement/hype bar. Ingestion via X API bearer token, Grok live-search
+    # (xAI key), or the manual /elon inbox. Off by default. Still fully gated.
+    elon_source_enabled: bool = Field(default=False, alias="STOCKFORGE_ELON_SOURCE")
+    elon_user_id: str = Field(default="44196397", alias="STOCKFORGE_ELON_USER_ID")
+    elon_min_engagement: int = Field(default=10000, alias="STOCKFORGE_ELON_MIN_ENGAGEMENT")
+    elon_provider: Literal["inbox", "x_api", "grok"] = Field(
+        default="inbox", alias="STOCKFORGE_ELON_PROVIDER"
+    )
+    x_bearer_token: str = Field(default="", alias="X_BEARER_TOKEN")
+    xai_api_key: str = Field(default="", alias="XAI_API_KEY")
+    xai_base_url: str = Field(default="https://api.x.ai/v1", alias="XAI_BASE_URL")
+    xai_model: str = Field(default="grok-4", alias="XAI_MODEL")
+
+    @field_validator("default_chain", "bankr_backend", "forge_llm_provider", "elon_provider", mode="before")
     @classmethod
     def _lower(cls, v: str) -> str:
         return v.lower() if isinstance(v, str) else v

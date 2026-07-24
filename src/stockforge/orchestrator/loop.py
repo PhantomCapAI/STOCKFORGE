@@ -43,9 +43,12 @@ from ..promo import Promoter
 from ..ratelimit import LaunchRateLimiter
 from ..signal import (
     AttentionScorer,
+    ElonTweetSource,
     ManualSource,
     NewsRssSource,
+    TweetInbox,
     WatchlistHeuristicSource,
+    XApiTweetProvider,
 )
 from .telegram import TelegramControl
 
@@ -66,8 +69,11 @@ class Orchestrator:
             self.store, daily_budget=settings.daily_launch_budget
         )
         self.manual = ManualSource()
-        # Real attention first (news), then the baseline heuristic + manual queue.
-        # The heuristic keeps the pipeline exercised even when there's no news.
+        # Elon-tweet inbox: also used by the /elon command to inject a test tweet
+        # when running without the paid X API / Grok provider.
+        self.tweet_inbox = TweetInbox()
+        # Real attention first (news, elon), then the baseline heuristic + manual
+        # queue. The heuristic keeps the pipeline exercised even when nothing hits.
         self.sources: list = []
         if settings.news_source_enabled:
             self.sources.append(
@@ -76,12 +82,36 @@ class Orchestrator:
                     freshness_hours=settings.news_freshness_hours,
                 )
             )
+        if settings.elon_source_enabled:
+            self.sources.append(self._build_elon_source())
         self.sources += [WatchlistHeuristicSource(settings.watchlist), self.manual]
         self.tg = TelegramControl(settings.telegram_bot_token, settings.telegram_chat_id)
         self.promoter = Promoter(notifier=self.tg.send)
         self._paused = False
         self._stop = asyncio.Event()
         self._tick = 0
+
+    def _build_elon_source(self) -> ElonTweetSource:
+        """Pick the tweet provider by config: X API (paid), Grok live-search
+        (xAI key), or the manual/webhook inbox. Falls back to the inbox so the
+        source always runs."""
+        s = self.settings
+        provider = self.tweet_inbox  # default: manual / webhook inbox
+        if s.elon_provider == "x_api" and s.x_bearer_token:
+            provider = XApiTweetProvider(s.x_bearer_token, user_id=s.elon_user_id)
+        elif s.elon_provider == "grok" and s.xai_api_key:
+            try:
+                from ..signal.elon import GrokTweetProvider
+
+                provider = GrokTweetProvider(
+                    s.xai_api_key,
+                    user_id=s.elon_user_id,
+                    base_url=s.xai_base_url,
+                    model=s.xai_model,
+                )
+            except ImportError:
+                log.warning("grok provider unavailable — falling back to inbox")
+        return ElonTweetSource(provider, min_engagement=float(s.elon_min_engagement))
 
     # ---- lifecycle -----------------------------------------------------------
     async def start(self) -> None:
@@ -406,6 +436,7 @@ class Orchestrator:
         self.tg.register("help", self._cmd_help)
         self.tg.register("status", self._cmd_status)
         self.tg.register("launch", self._cmd_launch)
+        self.tg.register("elon", self._cmd_elon)
         self.tg.register("claim", self._cmd_claim)
         self.tg.register("treasury", self._cmd_treasury)
         self.tg.register("pause", self._cmd_pause)
@@ -416,6 +447,7 @@ class Orchestrator:
             "Commands:\n"
             "/status — health, budget, circuit\n"
             "/launch <TICKER> [headline] — queue a manual candidate\n"
+            "/elon <tweet text> — inject a test Elon tweet\n"
             "/claim — sweep + claim fees now\n"
             "/treasury — extracted fees + compute funding\n"
             "/pause — halt the pipeline\n"
@@ -446,6 +478,15 @@ class Orchestrator:
         ticker, _, headline = arg.partition(" ")
         sig = self.manual.push(ticker, headline)
         return f"queued manual candidate {sig.ticker} (will be scored + gated next tick)"
+
+    async def _cmd_elon(self, arg: str) -> str:
+        if not arg:
+            return "usage: /elon <tweet text> — inject a test Elon tweet into the pipeline"
+        tw = self.tweet_inbox.push(arg, like_count=50_000)
+        return (
+            f"queued elon tweet {tw.id} — evaluated against the mark next tick "
+            "(needs STOCKFORGE_ELON_SOURCE=true)"
+        )
 
     async def _cmd_claim(self, _: str) -> str:
         await self._fee_sweep()
