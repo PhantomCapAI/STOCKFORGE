@@ -106,9 +106,21 @@ async def _status() -> int:
     return 0
 
 
+def _quiet_logs() -> None:
+    """Silence incidental INFO logs (e.g. DB 'state store ready') so the read-only
+    checklist output stays clean. The checks print their own status lines."""
+    import logging
+
+    logging.getLogger("stockforge").setLevel(logging.WARNING)
+
+
+_BAR = "  " + "─" * 54
+
+
 async def _doctor() -> int:
     from .health import run_doctor
 
+    _quiet_logs()
     settings = get_settings()
     print("== StockForge doctor ==")
     print(f"  backend={settings.bankr_backend} chain={settings.default_chain} "
@@ -116,30 +128,38 @@ async def _doctor() -> int:
     checks, ok = await run_doctor(settings)
     for c in checks:
         print(c.render())
+    print(_BAR)
     if ok:
-        print("\n  result: READY (no hard failures)")
+        print("  RESULT:  ✅ READY (no hard failures)")
     else:
-        print("\n  result: NOT READY — resolve ❌ items above before running live")
+        print("  RESULT:  ❌ NOT READY — resolve the ❌ items above before running live")
+    print(_BAR)
     return 0 if ok else 1
 
 
 async def _preflight() -> int:
     from .health import run_preflight
 
+    _quiet_logs()
     settings = get_settings()
-    print("== StockForge preflight (path to first live launch) ==")
+    print("== StockForge preflight — are you ready to turn dry-run OFF? ==")
     print(f"  backend={settings.bankr_backend} chain={settings.default_chain} "
           f"dry_run={settings.dry_run} require_approval={settings.require_approval}\n")
     checks, ready = await run_preflight(settings)
     for i, c in enumerate(checks, 1):
-        print(f"  {i}. {c.render().strip()}")
+        print(f"  {i:>2}. {c.render().strip()}")
+    print(f"\n{_BAR}")
     if ready:
-        print("\n  ✅ READY FOR LIVE — all critical prerequisites present.")
-        print("     Still required MANUALLY: verify one stock-paired launch on Bankr,")
-        print("     then set STOCKFORGE_DAILY_LAUNCH_BUDGET=1 before flipping dry-run off.")
+        print("  RESULT:  ✅ READY FOR LIVE")
+        print(_BAR)
+        print("  Still required MANUALLY before flipping dry-run off:")
+        print("    • verify ONE stock-paired launch on Bankr yourself (pair_status)")
+        print("    • set STOCKFORGE_DAILY_LAUNCH_BUDGET=1")
     else:
-        print("\n  ⛔ NOT READY FOR LIVE — resolve the flagged items above.")
-        print("     Dry-run stays ON until every critical item is green. This is by design.")
+        print("  RESULT:  ⛔ NOT READY FOR LIVE")
+        print(_BAR)
+        print("  Resolve every ⚠️/❌ item above. Dry-run stays ON until all are green.")
+        print("  This is by design — fail-closed.")
     return 0 if ready else 1
 
 
