@@ -129,6 +129,19 @@ class Store:
         rows = await cur.fetchall()
         return [json.loads(r["data"]) for r in rows]
 
+    async def launch_counts_by_wallet(self) -> dict[str, int]:
+        """Per-wallet launch attribution (parsed from stored records)."""
+        cur = await self.db.execute("SELECT data FROM launches")
+        rows = await cur.fetchall()
+        out: dict[str, int] = {}
+        for r in rows:
+            try:
+                wid = json.loads(r["data"]).get("request", {}).get("wallet_id", "main")
+            except Exception:  # noqa: BLE001
+                wid = "main"
+            out[wid] = out.get(wid, 0) + 1
+        return out
+
     async def confirmed_token_addresses(self) -> list[str]:
         cur = await self.db.execute(
             "SELECT DISTINCT token_address FROM launches "
@@ -144,6 +157,30 @@ class Store:
             (f.token_address, f.beneficiary, f.at, f.model_dump_json()),
         )
         await self.db.commit()
+
+    async def per_token_latest_fees(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Latest claimable snapshot per token (most recently seen first)."""
+        cur = await self.db.execute(
+            "SELECT token_address, MAX(at) AS at, data FROM fees GROUP BY token_address "
+            "ORDER BY at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                snap = json.loads(r["data"])
+            except Exception:  # noqa: BLE001
+                continue
+            out.append(
+                {
+                    "token": r["token_address"],
+                    "claimable_weth": snap.get("claimable_weth", 0.0),
+                    "claimed_weth": snap.get("claimed_weth", 0.0),
+                    "at": r["at"],
+                }
+            )
+        return out
 
     async def save_claim_record(self, record: dict[str, Any]) -> None:
         """Persist a secret-free fee-claim record (observability.build_claim_record)."""

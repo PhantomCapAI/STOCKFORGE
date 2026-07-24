@@ -165,16 +165,32 @@ async def _treasury() -> int:
     print(f"  treasury address : {settings.treasury or 'UNSET (set STOCKFORGE_TREASURY_ADDRESS or beneficiary)'}")
     print(f"  auto_claim       : {settings.auto_claim}   min_claim_weth={settings.fee_claim_min_weth}")
 
+    from .wallets import WalletPool
+
     store = Store(settings.db_path)
     await store.connect()
     summary = await store.claim_summary()
+    by_wallet = await store.launch_counts_by_wallet()
+    per_token = await store.per_token_latest_fees()
     await store.close()
+
+    # Wallet pool (one honest operation) + per-wallet launch attribution.
+    pool = WalletPool.from_settings(settings)
+    print("  -- wallets (one operation) --")
+    for w in pool.redacted():
+        print(f"  {w['id']:12} fees->{w['fee_recipient']}  launched={by_wallet.get(w['id'], 0)}")
+
     print("  -- local claim audit trail --")
     print(f"  claim attempts   : {summary['claim_attempts']}  successes={summary['claim_successes']}")
     print(f"  WETH claimed (recorded): {summary['weth_claimed_recorded']:.6f}")
     if summary["last_claim"]:
         lc = summary["last_claim"]
         print(f"  last claim       : {lc['at']} [{lc['mode']}] ok={lc['ok']} {lc['weth']:.6f} WETH")
+
+    if per_token:
+        print("  -- per-token fees (latest seen) --")
+        for t in per_token[:10]:
+            print(f"  {t['token'][:14]}… claimable={t['claimable_weth']} claimed={t['claimed_weth']}")
 
     if settings.treasury:
         try:

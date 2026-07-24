@@ -62,6 +62,25 @@ class Settings(BaseSettings):
     # Ticks between fee sweeps.
     fee_sweep_every_ticks: int = Field(default=6, alias="STOCKFORGE_FEE_SWEEP_EVERY_TICKS")
 
+    # ---- Multi-wallet (one honest operation, several wallets) ----------------
+    # Optional JSON list of wallets for key segregation / opsec / treasury
+    # splitting / SPOF reduction. Each: {"id","fee_recipient","api_key",
+    # "private_key","club"}. Empty = single 'main' wallet from the treasury.
+    # NOT for disguising one operator as many creators — attribution is tracked.
+    wallets_json: str = Field(default="", alias="STOCKFORGE_WALLETS")
+    # Per-wallet daily launch cap (each wallet independently respects Bankr's
+    # 50/100 + 1/min). STOCKFORGE_DAILY_LAUNCH_BUDGET remains the GLOBAL hard
+    # ceiling across all wallets.
+    per_wallet_daily_cap: int = Field(default=50, alias="STOCKFORGE_PER_WALLET_DAILY_CAP")
+
+    # ---- Promotion (operator-gated) ------------------------------------------
+    # On launch, compose a promo kit (tweet + one-liner + link) and notify the
+    # operator. Never auto-posts to public social — that stays human-gated.
+    promo_enabled: bool = Field(default=True, alias="STOCKFORGE_PROMO_ENABLED")
+    # Optional base for building a launch link from a token address when the
+    # deploy response has no pool URL (e.g. a DEX explorer base).
+    promo_link_base: str = Field(default="", alias="STOCKFORGE_PROMO_LINK_BASE")
+
     # ---- Telegram ------------------------------------------------------------
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")

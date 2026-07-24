@@ -207,14 +207,43 @@ STOCKFORGE_MIN_ATTENTION_SCORE=60      # lower = more launches (more marginal qu
 STOCKFORGE_TICK_SECONDS=60             # 1 tick/min matches the 1/min launch limit
 STOCKFORGE_AUTO_CLAIM=true             # consolidate fees to the treasury automatically
 BANKR_PRIVATE_KEY=0x...                # hot wallet — required for autonomous claiming
-STOCKFORGE_TREASURY_ADDRESS=0x...      # where all fees land
+STOCKFORGE_TREASURY_ADDRESS=0x...      # where all fees consolidate
+STOCKFORGE_PER_WALLET_DAILY_CAP=50     # each wallet respects Bankr's per-account cap
+# Optional: one operation, several wallets (opsec / treasury split / SPOF)
+STOCKFORGE_WALLETS='[{"id":"a","fee_recipient":"0x..","api_key":"bk_.."},{"id":"b","fee_recipient":"0x.."}]'
 # Optional: fees pay for the agent's own compute
 FORGE_LLM_PROVIDER=bankr               # concept generation via the Bankr LLM Gateway
 ```
 
-The `/pause` Telegram kill switch, daily budget, 1/min + 50/100-day caps, and the
-circuit breaker all still apply. Track extracted value with `stockforge treasury`
-or `/treasury`.
+The `/pause` Telegram kill switch, the global daily budget, per-wallet 1/min +
+50/100-day caps, and the circuit breaker all still apply. Track extracted value
+with `stockforge treasury` or `/treasury`.
+
+### Multi-wallet: one honest operation, several wallets
+
+`STOCKFORGE_WALLETS` (JSON) runs the engine across a pool of wallets for
+legitimate operational reasons — **key segregation / opsec, treasury splitting,
+reduced single-point-of-failure, and respecting each wallet's own Bankr rate
+limit.** Launches distribute least-recently-used; each wallet independently
+enforces Bankr's 50/100-per-day + 1/min, and `STOCKFORGE_DAILY_LAUNCH_BUDGET` is
+the global hard ceiling across all of them. Every launch is **attributed** to its
+wallet (visible in `launch_record`, `/status`, and `stockforge treasury`), and
+fees route to each wallet's recipient (default: the treasury, so they
+consolidate).
+
+This is explicitly **not** a disguise: the wallets are disclosed as one
+operation, attribution is tracked openly, and StockForge does not build machinery
+to make launches look like unrelated creators or to multiply past Bankr's
+per-account caps (that's sybil behavior Bankr restricts — its documented path for
+genuine high volume is a support ticket).
+
+### Promotion (operator-gated)
+
+On each launch, StockForge composes a **promo kit** — a launch tweet, a one-line
+narrative hook, and the launch link — and sends it to you for review (Telegram +
+logs). It **never auto-posts to public social**; a `Publisher` seam lets a real X
+poster / content agent plug in later. The "not affiliated with <TICKER>"
+disclaimer is always included. Toggle with `STOCKFORGE_PROMO_ENABLED`.
 
 ### Fees → compute (self-funding loop)
 

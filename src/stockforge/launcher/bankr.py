@@ -36,15 +36,18 @@ class BankrLauncher:
         self.settings = settings
         self.breaker = breaker or CircuitBreaker("bankr", failure_threshold=3, reset_timeout=300)
 
-    def _backend(self):
+    def _backend(self, api_key: str | None = None):
         if self.settings.bankr_backend == "cli":
+            # CLI auth comes from ~/.bankr/config.json or env; per-wallet identity
+            # on the CLI backend would need per-wallet CLI config (not wired). The
+            # wallet still governs fee routing + attribution.
             return BankrCliBackend(
                 binary=self.settings.bankr_cli_bin,
                 simulate=self.settings.dry_run,
             )
         return BankrRestBackend(
             base_url=self.settings.bankr_api_base,
-            api_key=self.settings.bankr_api_key,
+            api_key=api_key or self.settings.bankr_api_key,
         )
 
     def preview(self, req: LaunchRequest) -> dict:
@@ -79,7 +82,8 @@ class BankrLauncher:
             )
 
     def _finalize_pairing(self, req: LaunchRequest, result: LaunchResult) -> LaunchResult:
-        """Attach the best-effort stock-pairing verdict + clear logging."""
+        """Attach the best-effort stock-pairing verdict + wallet attribution + logging."""
+        result.wallet_id = req.wallet_id
         result.pair_requested = req.pair_with
         result.quote_labels = find_quote_labels(result.raw)
         result.pair_status = classify_pairing(
@@ -96,7 +100,7 @@ class BankrLauncher:
             )
         return result
 
-    async def launch(self, req: LaunchRequest) -> LaunchResult:
+    async def launch(self, req: LaunchRequest, api_key: str | None = None) -> LaunchResult:
         self._warn_cli_pairing(req)
 
         # Dry-run master switch: for REST we cannot guarantee simulation, so we
@@ -105,13 +109,14 @@ class BankrLauncher:
             log.warning("[DRY-RUN] REST launch suppressed for %s (%s)", req.symbol, req.name)
             result = LaunchResult(
                 request_id=req.id,
+                wallet_id=req.wallet_id,
                 status=LaunchStatus.SIMULATED,
                 raw={"preview": self.preview(req)},
             )
             return self._finalize_pairing(req, result)
 
         self.breaker.raise_if_open()
-        backend = self._backend()
+        backend = self._backend(api_key=api_key)
         try:
             if isinstance(backend, BankrRestBackend):
                 async with backend:

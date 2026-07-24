@@ -84,6 +84,7 @@ class LaunchRequest(BaseModel):
     name: str
     symbol: str
     chain: Chain = "base"
+    wallet_id: str = "main"  # which operation wallet launched this (attribution)
     image_url: str = ""
     tweet_url: str = ""
     website: str = ""
@@ -101,6 +102,7 @@ class LaunchResult(BaseModel):
     id: str = Field(default_factory=_id)
     request_id: str
     status: LaunchStatus
+    wallet_id: str = "main"  # attribution: which operation wallet launched it
     token_address: str = ""
     pool_id: str = ""
     initializer: str = ""  # Fees Manager contract for later claims

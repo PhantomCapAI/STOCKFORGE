@@ -106,11 +106,23 @@ standard WETH pool when the pairing is unsupported).
 4. **Later: x402 paid endpoints** — a second revenue stream (charge for the
    agent's outputs via x402). Seam only — **not built yet.**
 
-**Scope boundary.** This runs as ONE Bankr account inside the platform's caps
-(50/100 per day, 1/min, anti-sybil wallet-age gate, spam detection). Fee routing
-to multiple treasuries within one account is fine; multi-*account* machinery to
-exceed Bankr's caps is sybil behavior that gets accounts banned — not built and
-not supported. Anti-slop + the "not affiliated" disclaimer stay on.
+## Multi-wallet: one honest operation
+
+StockForge can run across a **pool of wallets** (`STOCKFORGE_WALLETS`) for
+legitimate operational reasons — key segregation/opsec, treasury splitting,
+reduced single-point-of-failure, and respecting each wallet's own Bankr rate
+limit. Launches distribute least-recently-used across wallets; each wallet
+independently enforces Bankr's 50/100 + 1/min, a global budget caps the whole
+operation, every launch is attributed to its wallet, and fees consolidate to the
+treasury. Promotion composes a review-first kit per launch (operator-gated).
+
+**Scope boundary (unchanged).** The wallets are **disclosed as one operation** —
+this is not a disguise. StockForge does **not** build anything to make launches
+look like unrelated/independent creators, or to multiply total volume past
+Bankr's per-account caps (sybil behavior Bankr restricts via its anti-sybil
+wallet-age gate + spam detection; the documented path for genuine high volume is
+a support ticket). Anti-slop + the "not affiliated" disclaimer stay on, and
+public social posting stays human-gated.
 
 See [`README.md`](README.md) for full detail and [`CLAUDE.md`](CLAUDE.md) for the
 go-live checklist. **Do not turn off dry-run** until that checklist is fully green.

@@ -43,11 +43,15 @@ class LaunchRateLimiter:
         daily_budget: int,
         is_club: bool = False,
         counter_name: str = "launch_attempts",
+        cap_to_bankr: bool = True,
     ):
         self.store = store
         self.is_club = is_club
         bankr_cap = BANKR_CLUB_DAILY if is_club else BANKR_STANDARD_DAILY
-        self.effective_daily = min(daily_budget, bankr_cap)
+        # Per-wallet limiters cap at Bankr's real per-account limit. The global
+        # operation ceiling (cap_to_bankr=False) is just the operator's own total
+        # budget across all wallets — each wallet still enforces Bankr's cap itself.
+        self.effective_daily = daily_budget if not cap_to_bankr else min(daily_budget, bankr_cap)
         self.counter_name = counter_name
         self._lock = asyncio.Lock()
 

@@ -50,6 +50,7 @@ from ..signal import (
     WatchlistHeuristicSource,
     XApiTweetProvider,
 )
+from ..wallets import Wallet, WalletPool
 from .telegram import TelegramControl
 
 log = get_logger("orchestrator")
@@ -65,8 +66,14 @@ class Orchestrator:
         self.launcher = BankrLauncher(settings, breaker=self.breaker)
         self.claimer = FeeClaimer(settings)
         self.promoter: Promoter | None = None
+        # One honest operation, one or more wallets. Each wallet respects Bankr's
+        # per-wallet cap; `self.rate` is the GLOBAL ceiling across all wallets.
+        self.pool = WalletPool.from_settings(settings)
         self.rate = LaunchRateLimiter(
-            self.store, daily_budget=settings.daily_launch_budget
+            self.store,
+            daily_budget=settings.daily_launch_budget,
+            counter_name="launch_all",
+            cap_to_bankr=False,
         )
         self.manual = ManualSource()
         # Elon-tweet inbox: also used by the /elon command to inject a test tweet
@@ -86,7 +93,11 @@ class Orchestrator:
             self.sources.append(self._build_elon_source())
         self.sources += [WatchlistHeuristicSource(settings.watchlist), self.manual]
         self.tg = TelegramControl(settings.telegram_bot_token, settings.telegram_chat_id)
-        self.promoter = Promoter(notifier=self.tg.send)
+        self.promoter = Promoter(
+            notifier=self.tg.send,
+            link_base=settings.promo_link_base,
+            enabled=settings.promo_enabled,
+        )
         self._paused = False
         self._stop = asyncio.Event()
         self._tick = 0
@@ -154,6 +165,13 @@ class Orchestrator:
             self.settings.auto_claim,
             self.settings.treasury or "unset",
         )
+        log.info(
+            "wallets: %d in pool %s | per-wallet cap %d/day | global budget %d/day",
+            len(self.pool.wallets),
+            [w["id"] for w in self.pool.redacted()],
+            self.settings.per_wallet_daily_cap,
+            self.settings.daily_launch_budget,
+        )
 
     # ---- main loop -----------------------------------------------------------
     async def _main_loop(self) -> None:
@@ -179,21 +197,29 @@ class Orchestrator:
         """Terse per-tick state line so continuous operation is observable in logs."""
         remaining = await self.rate.remaining_today()
         log.info(
-            "tick %d | budget %d/%d left | circuit=%s | mode=%s",
+            "tick %d | global budget %d/%d left | wallets=%d | circuit=%s | mode=%s",
             self._tick,
             remaining,
             self.rate.effective_daily,
+            len(self.pool.wallets),
             self.breaker.state.value,
             "dry-run" if self.settings.dry_run
             else ("autonomous" if self.settings.autonomous else "approval"),
         )
 
+    async def _select_wallet(self) -> tuple[Wallet, LaunchRateLimiter] | None:
+        return await self.pool.select(
+            self.store,
+            global_budget=self.settings.daily_launch_budget,
+            per_wallet_cap=self.settings.per_wallet_daily_cap,
+        )
+
     async def _pipeline_tick(self) -> None:
-        # Fast pre-gate: if we can't launch right now (budget spent / 1-min
-        # cooldown), don't spend network on signal polling + forging this tick.
-        decision = await self.rate.check()
-        if not decision.allowed:
-            log.debug("tick skipped: %s", decision.reason)
+        # Fast pre-gate: if no wallet can launch right now (global budget spent, or
+        # every wallet in 1-min cooldown / at its cap), don't spend network on
+        # signal polling + forging this tick.
+        if (await self._select_wallet()) is None:
+            log.debug("tick skipped: no eligible wallet (budget/cooldown)")
             return
 
         candidates = await self._eligible_candidates()
@@ -201,9 +227,8 @@ class Orchestrator:
             return
 
         # Try candidates best-first until one forges a clean concept AND the launch
-        # path accepts it. The rate limiter (1/min) guarantees at most one real
-        # launch per tick, so this just avoids wasting a whole tick when the top
-        # pick is anti-slop-rejected — it does NOT bypass any limit.
+        # path accepts it. Per-wallet 1/min + the global budget still bound how many
+        # actually launch — this just avoids wasting a tick on an anti-slop reject.
         recent = await self.store.recent_concept_slugs()
         for signal in candidates:
             log.info("candidate %s score=%.0f", signal.ticker, signal.attention_score)
@@ -214,9 +239,8 @@ class Orchestrator:
                 continue
             await self.store.save_concept(concept)
             result = await self._attempt_launch(concept)
-            # Stop once a launch was actually attempted or the limiter closed the
-            # window (result is None only when gated/rejected pre-Bankr).
-            if result is not None or not (await self.rate.check()).allowed:
+            # Stop once a launch was attempted or no wallet has capacity left.
+            if result is not None or (await self._select_wallet()) is None:
                 return
 
     async def _eligible_candidates(self) -> list[Signal]:
@@ -232,16 +256,18 @@ class Orchestrator:
         return eligible
 
     # ---- launch --------------------------------------------------------------
-    def _build_request(self, concept: Concept) -> LaunchRequest:
+    def _build_request(self, concept: Concept, wallet: Wallet) -> LaunchRequest:
         return LaunchRequest(
             concept_id=concept.id,
             name=concept.name,
             symbol=concept.symbol,
             chain=self.settings.default_chain,
+            wallet_id=wallet.id,
             image_url=concept.image_url,
-            # Route creator fees to the treasury (== beneficiary unless overridden).
-            fee_recipient=self.settings.treasury,
-            fee_recipient_type="address" if self.settings.treasury else "",
+            # Route creator fees to this wallet's recipient (defaults to the main
+            # treasury, so fees consolidate regardless of which wallet launched).
+            fee_recipient=wallet.fee_recipient,
+            fee_recipient_type="address" if wallet.fee_recipient else "",
             disable_vesting=self.settings.disable_vesting,
             # Stock-pairing intent only meaningful on Robinhood Chain (UNVERIFIED
             # capability — passed through as a hint, see launcher/base.py).
@@ -249,19 +275,21 @@ class Orchestrator:
         )
 
     async def gated_launch(self, concept: Concept) -> LaunchResult | None:
-        """The single controlled launch path: rate-limit → approval → dry-run →
-        Bankr → structured record. Returns None if gated or rejected. Used by both
-        the autonomous loop and the explicit one-shot CLI `stockforge launch`."""
-        decision = await self.rate.check()
-        if not decision.allowed:
-            log.info("launch gated: %s", decision.reason)
+        """The single controlled launch path: pick wallet → per-wallet + global
+        rate-limit → approval → dry-run → Bankr → structured record. Returns None
+        if gated or rejected. Used by the loop and the one-shot CLI `launch`."""
+        picked = await self._select_wallet()
+        if picked is None:
+            log.info("launch gated: no eligible wallet (global budget spent or all in cooldown/capped)")
             return None
+        wallet, wallet_rl = picked
 
-        req = self._build_request(concept)
+        req = self._build_request(concept, wallet)
         preview = self.launcher.preview(req)
         summary = (
             f"LAUNCH ${req.symbol} — {req.name}\n"
-            f"chain={req.chain} pair={preview['pair_with']} dry_run={self.settings.dry_run}\n"
+            f"wallet={wallet.id} chain={req.chain} pair={preview['pair_with']} "
+            f"dry_run={self.settings.dry_run}\n"
             f"thesis: {concept.thesis[:160]}\n"
             f"prompt: {preview['prompt']}"
         )
@@ -280,15 +308,21 @@ class Orchestrator:
             if not ok:
                 log.info("launch %s rejected/denied by operator", req.symbol)
                 # Record the denied attempt too (transparency) — no Bankr call made.
-                denied = LaunchResult(request_id=req.id, status=LaunchStatus.REJECTED, error="operator denied")
+                denied = LaunchResult(
+                    request_id=req.id,
+                    wallet_id=wallet.id,
+                    status=LaunchStatus.REJECTED,
+                    error="operator denied",
+                )
                 await self._record(concept, req, denied, approval_status, preview)
                 return None
         else:
             await self.tg.send(f"▶️ Auto-launch (dry_run={self.settings.dry_run})\n{summary}")
 
-        # Count the attempt BEFORE calling (Bankr counts failures too).
-        await self.rate.record()
-        result = await self.launcher.launch(req)
+        # Count the attempt against the wallet AND the global ceiling BEFORE
+        # calling (Bankr counts failures too).
+        await self.pool.record_launch(self.store, wallet, wallet_rl)
+        result = await self.launcher.launch(req, api_key=wallet.api_key or None)
         await self._record(concept, req, result, approval_status, preview)
 
         pair_line = ""
@@ -296,8 +330,8 @@ class Orchestrator:
             pair_line = f"\npair {result.pair_requested.upper()}: {result.pair_status.value}"
         await self.tg.send(
             f"{'✅' if result.status not in (LaunchStatus.FAILED,) else '❌'} "
-            f"${req.symbol} {result.status.value} {result.token_address or result.error}"
-            f"{pair_line}"
+            f"[{wallet.id}] ${req.symbol} {result.status.value} "
+            f"{result.token_address or result.error}{pair_line}"
         )
         return result
 
@@ -461,12 +495,18 @@ class Orchestrator:
         mode = "dry-run" if self.settings.dry_run else (
             "AUTONOMOUS" if self.settings.autonomous else "approval-gated"
         )
+        # Per-wallet usage today (each wallet respects Bankr's per-wallet cap).
+        wallet_lines = []
+        for w in self.pool.wallets:
+            wused = await self.store.get_daily_counter(w.counter())
+            wallet_lines.append(f"{w.id}:{wused}/{self.settings.per_wallet_daily_cap}")
         return (
             f"StockForge status\n"
             f"mode={mode} paused={self._paused} dry_run={self.settings.dry_run} "
             f"approval={self.settings.require_approval}\n"
             f"backend={self.settings.bankr_backend} chain={self.settings.default_chain}\n"
-            f"launches today={used} remaining={remaining} (cap {self.rate.effective_daily})\n"
+            f"global launches today={used} remaining={remaining} (budget {self.rate.effective_daily})\n"
+            f"wallets({len(self.pool.wallets)}): {', '.join(wallet_lines)}\n"
             f"auto_claim={self.settings.auto_claim} treasury={self.settings.treasury or 'unset'}\n"
             f"circuit={cb['state']} fails={cb['consecutive_failures']}\n"
             f"watchlist={','.join(self.settings.watchlist)}"

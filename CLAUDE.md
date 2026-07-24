@@ -135,6 +135,26 @@ autonomous it is — both default safe:
 `BANKR_BENEFICIARY_ADDRESS`) is the single fee recipient + claim destination
 (`Settings.treasury`). Both launch fee routing and claims use it.
 
+**Multi-wallet (`wallets.py`) — ONE honest operation, several wallets.**
+`STOCKFORGE_WALLETS` (JSON) defines a pool for legitimate ops reasons only: key
+segregation/opsec, treasury splitting, SPOF reduction, and respecting each
+wallet's own Bankr cap. Launches distribute least-recently-used across wallets;
+each wallet independently enforces Bankr's 50/100 + 1/min (per-wallet limiter),
+and `STOCKFORGE_DAILY_LAUNCH_BUDGET` is the GLOBAL hard ceiling across all wallets
+(`self.rate`, counter `launch_all`, `cap_to_bankr=False`). Every launch is
+attributed (`LaunchRequest.wallet_id` → record + `/status` + `/treasury`). Fees
+route to each wallet's `fee_recipient` (defaults to the treasury, so they
+consolidate). Empty pool = one `main` wallet (backward compatible). **This is NOT
+a disguise:** attribution is open, wallets are disclosed as one operation, and
+multiplying past Bankr's per-account caps via many accounts is sybil behavior we
+do not build. Per-wallet REST launching uses each wallet's `api_key`.
+
+**Promotion (`promo/promoter.py`) — operator-gated.** Each launch builds a
+`PromoKit` (tweet, one-liner, launch link) and notifies the operator via the
+`OperatorNotifyPublisher`. Public posting stays human-gated; a `Publisher` seam
+lets a real X/content agent plug in later. The "not affiliated" disclaimer is
+always included. `STOCKFORGE_PROMO_ENABLED` toggles it.
+
 **Observability.** Every launch → secret-free `launch_record`; every claim →
 secret-free `claim_record` (both JSON to stdout + persisted: `launches`/`claims`
 tables). Per-tick heartbeat logs budget remaining, circuit state, and mode.
@@ -198,6 +218,8 @@ disclaimer — they are anti-spam / anti-deception rails, not optional.
 | Add a Telegram command | `orchestrator/loop.py::_register_commands` |
 | Change launch/faucet policy | `.env` (`STOCKFORGE_*`) — no code change |
 | Route fees / set treasury | `.env` `STOCKFORGE_TREASURY_ADDRESS` (defaults to beneficiary) |
+| Add operation wallets | `.env` `STOCKFORGE_WALLETS` (JSON) — honest pool, `wallets.py` |
+| Plug in real X posting | new `Publisher` in `promo/promoter.py` (keep public posting human-gated) |
 | Go autonomous (no taps) | `.env` `STOCKFORGE_REQUIRE_APPROVAL=false` (still gated by budget/rate/dry-run) |
 
 ## Run / test

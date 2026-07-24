@@ -55,6 +55,7 @@ def build_launch_record(
     record: dict[str, Any] = {
         "event": "launch_attempt",
         "timestamp": _iso(result.finished_at),
+        "wallet_id": req.wallet_id,
         "name": req.name,
         "ticker": req.symbol,
         "paired_ticker": paired_ticker or req.pair_with,
