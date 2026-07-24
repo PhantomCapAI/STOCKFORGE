@@ -14,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Chain = Literal["base", "robinhood"]
 BankrBackend = Literal["cli", "rest"]
+LaunchMode = Literal["auto", "stock_paired", "standard"]
 
 
 class Settings(BaseSettings):
@@ -45,6 +46,13 @@ class Settings(BaseSettings):
 
     # ---- Launch policy -------------------------------------------------------
     default_chain: Chain = Field(default="base", alias="STOCKFORGE_DEFAULT_CHAIN")
+    # Dual-mode launching:
+    #   auto         = try stock-paired when it makes sense, degrade to standard
+    #   stock_paired = prefer a stock pair (only real on robinhood + a stock ticker)
+    #   standard     = normal pool, never request a stock pair
+    # Stock-pairing is preferred when it works; standard is a first-class path so
+    # the system never dies if pairing is weak/restricted/unavailable.
+    launch_mode: LaunchMode = Field(default="auto", alias="STOCKFORGE_LAUNCH_MODE")
     daily_launch_budget: int = Field(default=3, alias="STOCKFORGE_DAILY_LAUNCH_BUDGET")
     min_attention_score: int = Field(default=65, alias="STOCKFORGE_MIN_ATTENTION_SCORE")
     tick_seconds: int = Field(default=60, alias="STOCKFORGE_TICK_SECONDS")
@@ -133,7 +141,10 @@ class Settings(BaseSettings):
     # Optional website injected into every launch (blank = none).
     default_website: str = Field(default="", alias="STOCKFORGE_DEFAULT_WEBSITE")
 
-    @field_validator("default_chain", "bankr_backend", "forge_llm_provider", "elon_provider", mode="before")
+    @field_validator(
+        "default_chain", "bankr_backend", "forge_llm_provider", "elon_provider", "launch_mode",
+        mode="before",
+    )
     @classmethod
     def _lower(cls, v: str) -> str:
         return v.lower() if isinstance(v, str) else v

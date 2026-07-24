@@ -213,6 +213,19 @@ to multiply past those caps — that's ToS-violating sybil behavior and gets
 accounts banned. Keep the anti-slop checks and the "not affiliated with <TICKER>"
 disclaimer — they are anti-spam / anti-deception rails, not optional.
 
+## Dual-mode launching (stock-paired + standard, both first-class)
+
+`STOCKFORGE_LAUNCH_MODE` = `auto` (default) | `stock_paired` | `standard`.
+`launcher/pairing.py::resolve_pair_with(mode, ticker, chain, is_stock)` decides
+whether a launch requests a pair — only when mode allows AND `chain=robinhood`
+AND the ticker is a watchlist stock; otherwise a first-class STANDARD launch. No
+Bankr pairing param is fabricated. In `auto`, a stock-paired launch that FAILS is
+retried once as standard (`gated_launch` → `force_standard=True`). Operators force
+per-launch with `stockforge launch/preview --mode {auto|stock|standard}`. Records
+carry `launch_mode` + `pair_status` + `final_mode`; `treasury` shows the
+stock-paired/standard split. The system is NOT hardcoded stock-only — standard
+keeps it alive when pairing is weak/unavailable.
+
 ## Hard rules (safety > features)
 
 1. **Dry-run is the default.** `STOCKFORGE_DRY_RUN=true` means nothing broadcasts.

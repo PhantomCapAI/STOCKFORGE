@@ -24,6 +24,7 @@ from ..fees import FeeClaimer, FeeReader
 from ..forge import ConceptForge
 from ..forge.image import ImageForge
 from ..launcher import BankrLauncher
+from ..launcher.pairing import resolve_pair_with
 from ..logging import get_logger
 from ..models import (
     Approval,
@@ -280,11 +281,30 @@ class Orchestrator:
             concept.image_url = await self.image_forge.generate(concept.image_prompt)
 
     # ---- launch --------------------------------------------------------------
-    def _build_request(self, concept: Concept, wallet: Wallet) -> LaunchRequest:
+    def _is_stock(self, ticker: str) -> bool:
+        """A ticker is stock-pairable if it's one of our recognized stocks.
+        Non-stock / generic narratives route to a standard launch."""
+        return ticker.upper() in {t.upper() for t in self.settings.watchlist}
+
+    def _build_request(
+        self, concept: Concept, wallet: Wallet, mode: str | None = None, force_standard: bool = False
+    ) -> LaunchRequest:
+        effective_mode = (mode or self.settings.launch_mode).lower()
+        if force_standard:
+            pair_with, note = "", "standard (degraded from stock-pair)"
+        else:
+            pair_with, note = resolve_pair_with(
+                effective_mode,
+                concept.paired_ticker,
+                self.settings.default_chain,
+                self._is_stock(concept.paired_ticker),
+            )
+        log.debug("launch mode=%s -> %s", effective_mode, note)
         return LaunchRequest(
             concept_id=concept.id,
             name=concept.name,
             symbol=concept.symbol,
+            launch_mode=effective_mode,
             chain=self.settings.default_chain,
             wallet_id=wallet.id,
             image_url=concept.image_url,
@@ -295,27 +315,34 @@ class Orchestrator:
             fee_recipient=wallet.fee_recipient,
             fee_recipient_type="address" if wallet.fee_recipient else "",
             disable_vesting=self.settings.disable_vesting,
-            # Stock-pairing intent only meaningful on Robinhood Chain (UNVERIFIED
-            # capability — passed through as a hint, see launcher/base.py).
-            pair_with=concept.paired_ticker if self.settings.default_chain == "robinhood" else "",
+            # Dual-mode: pair_with is set only when the mode + chain + ticker allow
+            # it (resolve_pair_with). Empty = a first-class STANDARD launch.
+            pair_with=pair_with,
         )
 
-    async def gated_launch(self, concept: Concept) -> LaunchResult | None:
+    async def gated_launch(
+        self, concept: Concept, mode: str | None = None, force_standard: bool = False
+    ) -> LaunchResult | None:
         """The single controlled launch path: pick wallet → per-wallet + global
         rate-limit → approval → dry-run → Bankr → structured record. Returns None
-        if gated or rejected. Used by the loop and the one-shot CLI `launch`."""
+        if gated or rejected. Used by the loop and the one-shot CLI `launch`.
+
+        `mode` (auto/stock_paired/standard) overrides the configured launch mode
+        for this call. In `auto`, a stock-paired launch that FAILS is retried once
+        as a standard launch (safe degradation)."""
         picked = await self._select_wallet()
         if picked is None:
             log.info("launch gated: no eligible wallet (global budget spent or all in cooldown/capped)")
             return None
         wallet, wallet_rl = picked
 
-        req = self._build_request(concept, wallet)
+        req = self._build_request(concept, wallet, mode=mode, force_standard=force_standard)
         preview = self.launcher.preview(req)
+        launch_kind = "STOCK-PAIRED" if req.pair_with else "STANDARD"
         summary = (
             f"LAUNCH ${req.symbol} — {req.name}\n"
-            f"wallet={wallet.id} chain={req.chain} pair={preview['pair_with']} "
-            f"dry_run={self.settings.dry_run}\n"
+            f"wallet={wallet.id} mode={req.launch_mode} kind={launch_kind} "
+            f"chain={req.chain} pair={preview['pair_with']} dry_run={self.settings.dry_run}\n"
             f"thesis: {concept.thesis[:160]}\n"
             f"prompt: {preview['prompt']}"
         )
@@ -359,6 +386,31 @@ class Orchestrator:
             f"[{wallet.id}] ${req.symbol} {result.status.value} "
             f"{result.token_address or result.error}{pair_line}"
         )
+
+        # Safe degradation (auto mode only): a stock-paired launch that FAILED gets
+        # ONE standard retry, so the system doesn't die when pairing is unavailable.
+        effective_mode = (mode or self.settings.launch_mode).lower()
+        if (
+            effective_mode == "auto"
+            and req.pair_with
+            and result.status is LaunchStatus.FAILED
+            and not force_standard
+        ):
+            picked2 = await self._select_wallet()
+            if picked2 is not None:
+                w2, rl2 = picked2
+                log.warning("stock-pair launch failed for %s — degrading to STANDARD retry", req.symbol)
+                await self.tg.send(f"↘️ [{w2.id}] ${req.symbol} stock-pair failed — retrying STANDARD")
+                std_req = self._build_request(concept, w2, mode="auto", force_standard=True)
+                await self.pool.record_launch(self.store, w2, rl2)
+                std_result = await self.launcher.launch(std_req, api_key=w2.api_key or None)
+                await self._record(concept, std_req, std_result, approval_status, self.launcher.preview(std_req))
+                await self.tg.send(
+                    f"{'✅' if std_result.status not in (LaunchStatus.FAILED,) else '❌'} "
+                    f"[{w2.id}] ${std_req.symbol} STANDARD {std_result.status.value} "
+                    f"{std_result.token_address or std_result.error}"
+                )
+                return std_result
         return result
 
     async def _record(

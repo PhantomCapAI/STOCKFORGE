@@ -132,6 +132,20 @@ class Store:
         rows = await cur.fetchall()
         return [json.loads(r["data"]) for r in rows]
 
+    async def launch_kind_counts(self) -> dict[str, int]:
+        """Count launches by kind — stock-paired vs standard — from records."""
+        cur = await self.db.execute("SELECT data FROM launches")
+        rows = await cur.fetchall()
+        counts = {"stock_paired": 0, "standard": 0}
+        for r in rows:
+            try:
+                rec = json.loads(r["data"]).get("record", {})
+                requested = rec.get("requested_pair", "")
+                counts["stock_paired" if requested else "standard"] += 1
+            except Exception:  # noqa: BLE001
+                continue
+        return counts
+
     async def launch_counts_by_wallet(self) -> dict[str, int]:
         """Per-wallet launch attribution (parsed from stored records)."""
         cur = await self.db.execute("SELECT data FROM launches")

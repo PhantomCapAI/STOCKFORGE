@@ -51,14 +51,17 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("doctor", help="check environment readiness (fail-closed)")
     sub.add_parser("preflight", help="pre-live readiness checklist (fail-closed)")
     sub.add_parser("treasury", help="show extracted fees + compute-funding status")
+    _MODES = ["auto", "stock", "stock_paired", "standard"]
     p_prev = sub.add_parser("preview", help="forge + preview a launch (no broadcast)")
     p_prev.add_argument("ticker")
     p_prev.add_argument("--chain", default=None, choices=["base", "robinhood"])
+    p_prev.add_argument("--mode", default=None, choices=_MODES, help="auto | stock | standard")
     p_launch = sub.add_parser(
         "launch", help="controlled SINGLE launch (respects dry-run + approval)"
     )
     p_launch.add_argument("ticker")
     p_launch.add_argument("--chain", default=None, choices=["base", "robinhood"])
+    p_launch.add_argument("--mode", default=None, choices=_MODES, help="auto | stock | standard")
     p_promo = sub.add_parser("promo", help="generate a full launch copy package (no launch, no post)")
     p_promo.add_argument("ticker")
     p_self = sub.add_parser("selfcheck", help="run a full dry-run pipeline end to end")
@@ -90,9 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         if cmd == "treasury":
             return asyncio.run(_treasury())
         if cmd == "preview":
-            return asyncio.run(_preview(args.ticker, args.chain))
+            return asyncio.run(_preview(args.ticker, args.chain, args.mode))
         if cmd == "launch":
-            return asyncio.run(_launch_once(args.ticker, args.chain))
+            return asyncio.run(_launch_once(args.ticker, args.chain, args.mode))
         if cmd == "promo":
             return asyncio.run(_promo(args.ticker))
         if cmd == "selfcheck":
@@ -182,6 +185,7 @@ async def _treasury() -> int:
     await store.connect()
     summary = await store.claim_summary()
     by_wallet = await store.launch_counts_by_wallet()
+    kinds = await store.launch_kind_counts()
     per_token = await store.per_token_latest_fees()
     recent = await store.recent_claims(5)
     token_map = await store.token_recipients()
@@ -197,6 +201,7 @@ async def _treasury() -> int:
     print(f"  │ 💧 CLAIMABLE NOW (pending)  : {claimable_now:.6f} WETH")
     print(f"  │ 🚀 launches={total_launched}  claims_ok={summary['claim_successes']}/{summary['claim_attempts']}"
           f"  ✅pairs={n_conf}")
+    print(f"  │ 🧩 by kind: stock-paired={kinds['stock_paired']}  standard={kinds['standard']}")
     print(f"  └{'─'*52}")
 
     # Wallet pool (one honest operation) + per-wallet launch attribution.
@@ -327,7 +332,14 @@ async def _preflight() -> int:
     return 0 if ready else 1
 
 
-async def _launch_once(ticker: str, chain: str | None) -> int:
+def _norm_mode(mode: str | None) -> str | None:
+    """Map the CLI 'stock' alias to the internal 'stock_paired' mode."""
+    if mode is None:
+        return None
+    return "stock_paired" if mode == "stock" else mode
+
+
+async def _launch_once(ticker: str, chain: str | None, mode: str | None = None) -> int:
     """Controlled single launch. Respects dry-run (default) and, when live,
     Telegram approval. Logs the exact prompt and records the pair outcome."""
     from .models import Signal
@@ -337,9 +349,11 @@ async def _launch_once(ticker: str, chain: str | None) -> int:
     settings = get_settings()
     if chain:
         settings.default_chain = chain
+    mode = _norm_mode(mode)
     ticker = ticker.upper()
-    mode = "DRY-RUN (nothing broadcasts)" if settings.dry_run else "LIVE"
-    print(f"== Controlled single launch — {ticker} on {settings.default_chain} [{mode}] ==")
+    run_mode = "DRY-RUN (nothing broadcasts)" if settings.dry_run else "LIVE"
+    print(f"== Controlled single launch — {ticker} on {settings.default_chain} "
+          f"[mode={mode or settings.launch_mode}, {run_mode}] ==")
 
     orch = Orchestrator(settings)
     await orch.store.connect()
@@ -368,7 +382,7 @@ async def _launch_once(ticker: str, chain: str | None) -> int:
             print("  waiting for Telegram approval (tap Approve/Reject)…")
             poller = asyncio.create_task(orch.tg.run())
         try:
-            result = await orch.gated_launch(concept)
+            result = await orch.gated_launch(concept, mode=mode)
         finally:
             if poller is not None:
                 await orch.tg.stop()
@@ -488,13 +502,15 @@ async def _selfcheck(ticker: str, chain: str | None, live_approval: bool) -> int
     return 0
 
 
-async def _preview(ticker: str, chain: str | None) -> int:
+async def _preview(ticker: str, chain: str | None, mode: str | None = None) -> int:
     from .forge import ConceptForge
     from .launcher import BankrLauncher
+    from .launcher.pairing import resolve_pair_with
     from .models import LaunchRequest
     from .signal import AttentionScorer
 
     settings = get_settings()
+    mode = _norm_mode(mode) or settings.launch_mode
     scorer = AttentionScorer()
     sig = scorer.enrich(
         Signal(ticker=ticker.upper(), headline=f"{ticker.upper()} manual preview", sources=["cli"], meta={"magnitude": 20})
@@ -506,14 +522,17 @@ async def _preview(ticker: str, chain: str | None) -> int:
         print("concept rejected by anti-slop; try again")
         return 1
     chain = chain or settings.default_chain
+    is_stock = concept.paired_ticker.upper() in {t.upper() for t in settings.watchlist}
+    pair_with, note = resolve_pair_with(mode, concept.paired_ticker, chain, is_stock)
     req = LaunchRequest(
         concept_id=concept.id,
         name=concept.name,
         symbol=concept.symbol,
         chain=chain,
+        launch_mode=mode,
         fee_recipient=settings.bankr_beneficiary_address,
         disable_vesting=settings.disable_vesting,
-        pair_with=concept.paired_ticker if chain == "robinhood" else "",
+        pair_with=pair_with,
     )
     preview = BankrLauncher(settings).preview(req)
     print(f"== Concept for {ticker.upper()} (attention {sig.attention_score:.0f}/100) ==")
@@ -522,7 +541,7 @@ async def _preview(ticker: str, chain: str | None) -> int:
     print(f"  unique  : {concept.uniqueness_score:.2f}")
     print(f"  thesis  : {concept.thesis}")
     print(f"  tweet   : {concept.launch_tweet}")
-    print("== Launch request (NOT sent) ==")
+    print(f"== Launch request (NOT sent) — mode={mode}, {'STOCK-PAIRED' if pair_with else 'STANDARD'} ({note}) ==")
     for k, v in preview.items():
         print(f"  {k:10}: {v}")
     return 0

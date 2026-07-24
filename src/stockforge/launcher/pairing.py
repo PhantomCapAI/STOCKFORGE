@@ -43,6 +43,29 @@ _LABEL_KEYS = (
 )
 
 
+def resolve_pair_with(mode: str, ticker: str, chain: str, is_stock: bool) -> tuple[str, str]:
+    """Decide whether a launch requests a stock pair, given the launch mode.
+
+    Returns (pair_with, note). `pair_with` empty means a STANDARD launch (normal
+    pool). Modes:
+      * standard     -> never pair.
+      * stock_paired -> pair when it's actually possible (robinhood + a real stock
+                        ticker); otherwise fall through to standard (we never
+                        fabricate an unsupported pairing).
+      * auto         -> same as stock_paired for the initial attempt; the caller
+                        additionally degrades to a standard retry if the paired
+                        launch fails.
+    """
+    mode = (mode or "auto").lower()
+    if mode == "standard":
+        return "", "standard (forced)"
+    if chain != "robinhood":
+        return "", f"standard (stock-pairing needs robinhood chain, chain={chain})"
+    if not is_stock:
+        return "", "standard (not a recognized stock ticker)"
+    return ticker.upper(), f"stock-pair requested ({mode})"
+
+
 def stock_pair_phrase(ticker: str, chain: str) -> str:
     """The natural-language fragment expressing the pairing intent.
 

@@ -65,6 +65,37 @@ Full CLI:
 Telegram mirrors these: `/status /launch /promo /claim /treasury /confirmpair
 /pause /resume` plus Approve/Reject buttons on every real launch or claim.
 
+## Dual-mode launching (stock-paired **and** standard)
+
+StockForge supports both launch paths as first-class — it is **not** stock-only,
+so it never dies if pairing is weak, restricted, or unavailable.
+
+| `STOCKFORGE_LAUNCH_MODE` | Behavior |
+|---|---|
+| `auto` (default) | Try a stock pair when it makes sense (robinhood chain + a recognized watchlist stock); **on failure, retry once as a standard launch** |
+| `stock_paired` | Prefer a stock pair when it's actually possible; otherwise a standard launch (never a fabricated pairing) |
+| `standard` | Normal pool, never request a stock pair |
+
+**Routing.** A launch only requests a stock pair when the mode allows it **and**
+the chain is `robinhood` **and** the ticker is a recognized stock (in
+`STOCKFORGE_WATCHLIST`). Non-stock / generic narratives route to a standard
+launch automatically. No Bankr stock-pair parameter is fabricated — pairing is
+expressed via the NL prompt and the outcome is classified after the fact.
+
+**Force a mode per launch:**
+```bash
+stockforge launch NVDA --chain robinhood --mode stock     # force stock-paired
+stockforge launch NVDA --mode standard                    # force standard
+stockforge preview NVDA --chain robinhood --mode auto     # see what would be sent
+```
+
+**Outcomes are recorded** on every launch: `launch_mode` (requested: auto/
+stock_paired/standard), `pair_status` (`accepted / degraded / rejected /
+requested / not_requested`), and `final_mode` (stock-pair vs standard). In `auto`
+mode a failed stock-pair launch is followed by a `↘️ … retrying STANDARD` and a
+second recorded standard attempt. `stockforge treasury` shows the split:
+`by kind: stock-paired=N standard=M`.
+
 ## Human Verification Gate
 
 **Do these in order on a real machine. Dry-run stays ON until the last step.**

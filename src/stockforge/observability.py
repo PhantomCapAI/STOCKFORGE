@@ -59,6 +59,7 @@ def build_launch_record(
         "name": req.name,
         "ticker": req.symbol,
         "paired_ticker": paired_ticker or req.pair_with,
+        "launch_mode": req.launch_mode,  # requested mode: auto/stock_paired/standard
         "requested_pair": req.pair_with or "",
         "final_mode": final_mode(result.pair_status),
         "pair_status": result.pair_status.value,

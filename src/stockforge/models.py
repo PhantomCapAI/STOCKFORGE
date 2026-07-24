@@ -86,6 +86,7 @@ class LaunchRequest(BaseModel):
     symbol: str
     chain: Chain = "base"
     wallet_id: str = "main"  # which operation wallet launched this (attribution)
+    launch_mode: str = "auto"  # requested mode: auto | stock_paired | standard
     image_url: str = ""
     tweet_url: str = ""
     website: str = ""
