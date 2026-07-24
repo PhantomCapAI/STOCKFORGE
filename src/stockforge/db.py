@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS launches (
 CREATE TABLE IF NOT EXISTS fees (
     token_address TEXT, beneficiary TEXT, at REAL, data TEXT
 );
+CREATE TABLE IF NOT EXISTS claims (
+    at REAL, treasury TEXT, ok INTEGER, mode TEXT, claimable_weth REAL, data TEXT
+);
 CREATE TABLE IF NOT EXISTS approvals (
     id TEXT PRIMARY KEY, kind TEXT, ref_id TEXT, status TEXT, created_at REAL, data TEXT
 );
@@ -139,6 +142,21 @@ class Store:
         await self.db.execute(
             "INSERT INTO fees VALUES (?,?,?,?)",
             (f.token_address, f.beneficiary, f.at, f.model_dump_json()),
+        )
+        await self.db.commit()
+
+    async def save_claim_record(self, record: dict[str, Any]) -> None:
+        """Persist a secret-free fee-claim record (observability.build_claim_record)."""
+        await self.db.execute(
+            "INSERT INTO claims VALUES (?,?,?,?,?,?)",
+            (
+                record.get("timestamp"),
+                record.get("treasury", ""),
+                1 if record.get("ok") else 0,
+                record.get("mode", ""),
+                float(record.get("claimable_weth", 0.0)),
+                json.dumps(record),
+            ),
         )
         await self.db.commit()
 

@@ -45,6 +45,18 @@ class Settings(BaseSettings):
     tick_seconds: int = Field(default=60, alias="STOCKFORGE_TICK_SECONDS")
     disable_vesting: bool = Field(default=False, alias="STOCKFORGE_DISABLE_VESTING")
 
+    # ---- Fee capture / treasury ----------------------------------------------
+    # Single address all creator fees route to (fee recipient at launch + claim
+    # destination). Defaults to BANKR_BENEFICIARY_ADDRESS when unset.
+    treasury_address: str = Field(default="", alias="STOCKFORGE_TREASURY_ADDRESS")
+    # Automatically claim accrued fees during fee sweeps (still subject to
+    # dry-run + approval). False = monitor/report only, never claim.
+    auto_claim: bool = Field(default=True, alias="STOCKFORGE_AUTO_CLAIM")
+    # Minimum claimable WETH before a claim is triggered (avoids dust claims/gas).
+    fee_claim_min_weth: float = Field(default=0.001, alias="STOCKFORGE_FEE_CLAIM_MIN_WETH")
+    # Ticks between fee sweeps.
+    fee_sweep_every_ticks: int = Field(default=6, alias="STOCKFORGE_FEE_SWEEP_EVERY_TICKS")
+
     # ---- Telegram ------------------------------------------------------------
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
@@ -81,6 +93,18 @@ class Settings(BaseSettings):
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)
 
+    @property
+    def treasury(self) -> str:
+        """The address all creator fees route to (fee recipient + claim target).
+        Explicit treasury wins; otherwise the Bankr beneficiary is the treasury."""
+        return self.treasury_address or self.bankr_beneficiary_address
+
+    @property
+    def autonomous(self) -> bool:
+        """True when real launches proceed with NO Telegram tap (approval off and
+        not dry-run). The kill switch, budget, and rate limits still apply."""
+        return not self.require_approval and not self.dry_run
+
     def redacted(self) -> dict:
         """Config snapshot safe to log — secrets masked."""
 
@@ -95,6 +119,10 @@ class Settings(BaseSettings):
             "bankr_api_key": mask(self.bankr_api_key),
             "bankr_private_key": mask(self.bankr_private_key),
             "beneficiary": self.bankr_beneficiary_address or "unset",
+            "treasury": self.treasury or "unset",
+            "autonomous": self.autonomous,
+            "auto_claim": self.auto_claim,
+            "fee_claim_min_weth": self.fee_claim_min_weth,
             "default_chain": self.default_chain,
             "daily_launch_budget": self.daily_launch_budget,
             "min_attention_score": self.min_attention_score,

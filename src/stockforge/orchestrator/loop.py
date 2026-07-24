@@ -33,7 +33,12 @@ from ..models import (
     LaunchStatus,
     Signal,
 )
-from ..observability import build_launch_record, log_launch_record
+from ..observability import (
+    build_claim_record,
+    build_launch_record,
+    log_claim_record,
+    log_launch_record,
+)
 from ..promo import Promoter
 from ..ratelimit import LaunchRateLimiter
 from ..signal import (
@@ -45,8 +50,6 @@ from ..signal import (
 from .telegram import TelegramControl
 
 log = get_logger("orchestrator")
-
-FEE_SWEEP_EVERY = 6  # ticks between fee sweeps
 
 
 class Orchestrator:
@@ -85,8 +88,7 @@ class Orchestrator:
         await self.store.connect()
         self._register_commands()
         log.info("config: %s", self.settings.redacted())
-        if self.settings.dry_run:
-            log.warning("DRY-RUN active — no on-chain launches or claims will broadcast")
+        self._announce_mode()
         tasks = [asyncio.create_task(self._main_loop(), name="main-loop")]
         if self.tg.enabled:
             tasks.append(asyncio.create_task(self.tg.run(), name="telegram"))
@@ -103,14 +105,36 @@ class Orchestrator:
         await self.store.close()
         log.info("shutdown complete")
 
+    def _announce_mode(self) -> None:
+        """One clear line describing exactly how the engine will behave."""
+        if self.settings.dry_run:
+            log.warning("DRY-RUN active — no on-chain launches or claims will broadcast")
+        elif self.settings.autonomous:
+            log.warning(
+                "AUTONOMOUS LIVE — launches broadcast WITHOUT a Telegram tap "
+                "(budget %d/day, 1/min, kill switch via /pause)",
+                self.rate.effective_daily,
+            )
+        else:
+            log.warning("LIVE — every real launch/claim requires a Telegram approval tap")
+        log.info(
+            "engine: continuous loop tick=%ds fee_sweep_every=%d auto_claim=%s treasury=%s",
+            self.settings.tick_seconds,
+            self.settings.fee_sweep_every_ticks,
+            self.settings.auto_claim,
+            self.settings.treasury or "unset",
+        )
+
     # ---- main loop -----------------------------------------------------------
     async def _main_loop(self) -> None:
+        sweep_every = max(1, self.settings.fee_sweep_every_ticks)
         while not self._stop.is_set():
             self._tick += 1
             try:
                 if not self._paused:
+                    await self._heartbeat()
                     await self._pipeline_tick()
-                    if self._tick % FEE_SWEEP_EVERY == 0:
+                    if self._tick % sweep_every == 0:
                         await self._fee_sweep()
             except CircuitOpenError as e:
                 log.warning("skipping tick: %s", e)
@@ -121,23 +145,51 @@ class Orchestrator:
                 timeout=self.settings.tick_seconds,
             )
 
+    async def _heartbeat(self) -> None:
+        """Terse per-tick state line so continuous operation is observable in logs."""
+        remaining = await self.rate.remaining_today()
+        log.info(
+            "tick %d | budget %d/%d left | circuit=%s | mode=%s",
+            self._tick,
+            remaining,
+            self.rate.effective_daily,
+            self.breaker.state.value,
+            "dry-run" if self.settings.dry_run
+            else ("autonomous" if self.settings.autonomous else "approval"),
+        )
+
     async def _pipeline_tick(self) -> None:
-        signal = await self._best_candidate()
-        if signal is None:
+        # Fast pre-gate: if we can't launch right now (budget spent / 1-min
+        # cooldown), don't spend network on signal polling + forging this tick.
+        decision = await self.rate.check()
+        if not decision.allowed:
+            log.debug("tick skipped: %s", decision.reason)
             return
-        log.info("candidate %s score=%.0f", signal.ticker, signal.attention_score)
-        await self.store.save_signal(signal)
 
+        candidates = await self._eligible_candidates()
+        if not candidates:
+            return
+
+        # Try candidates best-first until one forges a clean concept AND the launch
+        # path accepts it. The rate limiter (1/min) guarantees at most one real
+        # launch per tick, so this just avoids wasting a whole tick when the top
+        # pick is anti-slop-rejected — it does NOT bypass any limit.
         recent = await self.store.recent_concept_slugs()
-        concept = await self.forge.forge(signal, recent_slugs=recent)
-        if concept is None:
-            log.info("no clean concept for %s this tick", signal.ticker)
-            return
-        await self.store.save_concept(concept)
+        for signal in candidates:
+            log.info("candidate %s score=%.0f", signal.ticker, signal.attention_score)
+            await self.store.save_signal(signal)
+            concept = await self.forge.forge(signal, recent_slugs=recent)
+            if concept is None:
+                log.info("no clean concept for %s; trying next", signal.ticker)
+                continue
+            await self.store.save_concept(concept)
+            result = await self._attempt_launch(concept)
+            # Stop once a launch was actually attempted or the limiter closed the
+            # window (result is None only when gated/rejected pre-Bankr).
+            if result is not None or not (await self.rate.check()).allowed:
+                return
 
-        await self._attempt_launch(concept)
-
-    async def _best_candidate(self) -> Signal | None:
+    async def _eligible_candidates(self) -> list[Signal]:
         collected: list[Signal] = []
         for src in self.sources:
             try:
@@ -146,10 +198,8 @@ class Orchestrator:
             except Exception:  # noqa: BLE001
                 log.exception("source %s failed", getattr(src, "name", "?"))
         eligible = [s for s in collected if s.attention_score >= self.settings.min_attention_score]
-        if not eligible:
-            return None
         eligible.sort(key=lambda s: s.attention_score, reverse=True)
-        return eligible[0]
+        return eligible
 
     # ---- launch --------------------------------------------------------------
     def _build_request(self, concept: Concept) -> LaunchRequest:
@@ -159,8 +209,9 @@ class Orchestrator:
             symbol=concept.symbol,
             chain=self.settings.default_chain,
             image_url=concept.image_url,
-            fee_recipient=self.settings.bankr_beneficiary_address,
-            fee_recipient_type="address" if self.settings.bankr_beneficiary_address else "",
+            # Route creator fees to the treasury (== beneficiary unless overridden).
+            fee_recipient=self.settings.treasury,
+            fee_recipient_type="address" if self.settings.treasury else "",
             disable_vesting=self.settings.disable_vesting,
             # Stock-pairing intent only meaningful on Robinhood Chain (UNVERIFIED
             # capability — passed through as a hint, see launcher/base.py).
@@ -250,7 +301,7 @@ class Orchestrator:
             result.token_address,
         )
 
-    async def _attempt_launch(self, concept: Concept) -> None:
+    async def _attempt_launch(self, concept: Concept) -> LaunchResult | None:
         result = await self.gated_launch(concept)
         if result and result.status in (
             LaunchStatus.CONFIRMED,
@@ -259,11 +310,12 @@ class Orchestrator:
         ):
             if self.promoter:
                 await self.promoter.promote(concept, result)
+        return result
 
     # ---- fees ----------------------------------------------------------------
     async def _fee_sweep(self) -> None:
-        beneficiary = self.settings.bankr_beneficiary_address
-        if not beneficiary:
+        treasury = self.settings.treasury
+        if not treasury:
             return
         addresses = await self.store.confirmed_token_addresses()
         if not addresses:
@@ -271,20 +323,35 @@ class Orchestrator:
         claimable_total = 0.0
         async with FeeReader(self.settings.bankr_api_base) as reader:
             for addr in addresses:
-                snap = await reader.claimable_for(addr, beneficiary)
-                snap.beneficiary = beneficiary
+                snap = await reader.claimable_for(addr, treasury)
+                snap.beneficiary = treasury
                 await self.store.save_fee_snapshot(snap)
                 claimable_total += snap.claimable_weth
-        log.info("fee sweep: %d tokens, %.6f WETH claimable", len(addresses), claimable_total)
-        # Only escalate to a claim when there's meaningful value.
-        if claimable_total >= 0.001:
+        log.info(
+            "fee sweep: %d tokens, %.6f WETH claimable -> treasury %s",
+            len(addresses),
+            claimable_total,
+            treasury,
+        )
+        if not self.settings.auto_claim:
+            log.info("auto_claim off — monitoring only, not claiming")
+            return
+        # Only escalate to a claim when there's meaningful value (avoid dust/gas).
+        if claimable_total >= self.settings.fee_claim_min_weth:
             await self._maybe_claim(addresses, claimable_total)
 
     async def _maybe_claim(self, addresses: list[str], total_weth: float) -> None:
-        summary = f"CLAIM fees: {len(addresses)} tokens, ~{total_weth:.6f} WETH claimable"
+        treasury = self.settings.treasury
+        summary = (
+            f"CLAIM fees: {len(addresses)} tokens, ~{total_weth:.6f} WETH -> {treasury}"
+        )
+        approval_status = "not_required (dry-run)" if self.settings.dry_run else "auto (approval off)"
+
         if self.settings.dry_run:
             await self.tg.send(f"🧪 [dry-run] would claim — {summary}")
+            await self._record_claim(addresses, total_weth, approval_status, "dry-run", True, "suppressed (dry-run)")
             return
+
         if self.settings.require_approval:
             approval = Approval(kind=ApprovalKind.CLAIM, ref_id=",".join(addresses)[:200], summary=summary)
             await self.store.save_approval(approval)
@@ -292,15 +359,47 @@ class Orchestrator:
             approval.status = "approved" if ok else "rejected"
             approval.decided_at = time.time()
             await self.store.save_approval(approval)
+            approval_status = approval.status
             if not ok:
+                await self._record_claim(addresses, total_weth, approval_status, "denied", False, "operator denied")
                 return
+
+        # Prefer a real wallet claim (broadcasts to treasury) when a hot key is
+        # present; otherwise build UNSIGNED txs for the operator to sign.
         if self.settings.bankr_private_key:
             outcome = await self.claimer.claim_wallet_cli()
         else:
             outcome = await self.claimer.build_unsigned(addresses)
+        await self._record_claim(
+            addresses, total_weth, approval_status, outcome.mode, outcome.ok, outcome.detail
+        )
         await self.tg.send(
             f"{'✅' if outcome.ok else '❌'} claim [{outcome.mode}] {outcome.detail}"
         )
+
+    async def _record_claim(
+        self,
+        addresses: list[str],
+        total_weth: float,
+        approval_status: str,
+        mode: str,
+        ok: bool,
+        detail: str,
+    ) -> None:
+        """Build → log (JSON line) → persist a secret-free fee-claim record."""
+        record = build_claim_record(
+            treasury=self.settings.treasury,
+            token_addresses=addresses,
+            claimable_weth=total_weth,
+            dry_run=self.settings.dry_run,
+            approval_status=approval_status,
+            mode=mode,
+            ok=ok,
+            detail=detail,
+            at=time.time(),
+        )
+        log_claim_record(record)
+        await self.store.save_claim_record(record)
 
     # ---- telegram commands ---------------------------------------------------
     def _register_commands(self) -> None:
@@ -325,12 +424,16 @@ class Orchestrator:
         remaining = await self.rate.remaining_today()
         used = await self.store.get_daily_counter(self.rate.counter_name)
         cb = self.breaker.snapshot()
+        mode = "dry-run" if self.settings.dry_run else (
+            "AUTONOMOUS" if self.settings.autonomous else "approval-gated"
+        )
         return (
             f"StockForge status\n"
-            f"paused={self._paused} dry_run={self.settings.dry_run} "
+            f"mode={mode} paused={self._paused} dry_run={self.settings.dry_run} "
             f"approval={self.settings.require_approval}\n"
             f"backend={self.settings.bankr_backend} chain={self.settings.default_chain}\n"
             f"launches today={used} remaining={remaining} (cap {self.rate.effective_daily})\n"
+            f"auto_claim={self.settings.auto_claim} treasury={self.settings.treasury or 'unset'}\n"
             f"circuit={cb['state']} fails={cb['consecutive_failures']}\n"
             f"watchlist={','.join(self.settings.watchlist)}"
         )

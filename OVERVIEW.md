@@ -61,5 +61,39 @@ money move over Telegram.
 - **Rate limit + circuit breaker** — never exceed Bankr's caps; back off after 3 failures.
 - **Every attempt is recorded** — a secret-free JSON `launch_record` to stdout + SQLite.
 
+## Running it as a continuous fee faucet
+
+The engine is designed to run non-stop and turn stock attention into claimable
+trading fees, all routed to one **treasury** address. Two switches control how
+hands-on it is (both default to the safe setting):
+
+| `.env` | Safe default | Faucet mode |
+|---|---|---|
+| `STOCKFORGE_DRY_RUN` | `true` (nothing broadcasts) | `false` |
+| `STOCKFORGE_REQUIRE_APPROVAL` | `true` (Telegram tap each time) | `false` (autonomous) |
+
+With both flipped, the loop each tick: finds the strongest narrative → forges a
+concept → **launches autonomously** (no tap) → routes creator fees to the
+treasury → periodically **claims** those fees to the treasury. It never exceeds
+the daily budget or Bankr's 1-launch/minute limit, and `/pause` stops it instantly.
+
+**Fee routing.** `STOCKFORGE_TREASURY_ADDRESS` is the single fee recipient +
+claim destination (defaults to `BANKR_BENEFICIARY_ADDRESS`). `STOCKFORGE_AUTO_CLAIM=true`
+lets sweeps collect fees on their own once they clear `STOCKFORGE_FEE_CLAIM_MIN_WETH`.
+Autonomous on-chain claiming needs `BANKR_PRIVATE_KEY` (a minimally-funded hot
+wallet); without it, claims are built as unsigned txs for you to sign.
+
+## Intended expansion path
+
+1. **Continuous stock-paired launches** — where we are now: one engine, one
+   treasury, launching + claiming non-stop within limits. Stock-pairing prefers
+   Robinhood Chain and degrades safely to a standard pool when unverified.
+2. **Fee consolidation into treasury** — all creator fees flow to one address;
+   claim records are logged + persisted for accounting.
+3. **Later: multiple agent wallets + x402 surfaces** — several Bankr-native
+   agents, each with its own wallet, consolidating into the treasury, with x402
+   payment surfaces on top. The single-engine code is structured so this is an
+   additive step (more launchers/beneficiaries), not a rewrite. **Not built yet.**
+
 See [`README.md`](README.md) for full detail and [`CLAUDE.md`](CLAUDE.md) for the
 go-live checklist. **Do not turn off dry-run** until that checklist is fully green.

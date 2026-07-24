@@ -78,3 +78,37 @@ def build_launch_record(
 def log_launch_record(record: dict[str, Any]) -> None:
     """Emit the record as a single JSON line for log scrapers."""
     log.info("launch_record %s", json.dumps(record, separators=(",", ":"), sort_keys=True))
+
+
+def build_claim_record(
+    *,
+    treasury: str,
+    token_addresses: list[str],
+    claimable_weth: float,
+    dry_run: bool,
+    approval_status: str,
+    mode: str,
+    ok: bool,
+    detail: str,
+    at: float,
+) -> dict[str, Any]:
+    """Secret-free record of a fee-claim attempt. `treasury` is the public fee
+    recipient — never a private key. `mode` is cli / build-claim / dry-run."""
+    return {
+        "event": "fee_claim",
+        "timestamp": _iso(at),
+        "treasury": treasury,
+        "token_count": len(token_addresses),
+        "tokens": token_addresses[:50],
+        "claimable_weth": round(claimable_weth, 8),
+        "dry_run": dry_run,
+        "approval_status": approval_status,
+        "mode": mode,
+        "ok": ok,
+        "detail": (detail or "")[:300],
+    }
+
+
+def log_claim_record(record: dict[str, Any]) -> None:
+    """Emit the fee-claim record as a single JSON line for log scrapers."""
+    log.info("claim_record %s", json.dumps(record, separators=(",", ":"), sort_keys=True))

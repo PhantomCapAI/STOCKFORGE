@@ -155,7 +155,39 @@ Follow this in order. **Dry-run stays ON the entire time until the last step.**
 Every launch attempt (dry-run included) emits a secret-free `launch_record` JSON
 line to stdout and is persisted to SQLite: timestamp, name, ticker, requested
 pair, final mode (stock-pair / standard), dry-run flag, approval status, and a
-Bankr response summary.
+Bankr response summary. Every fee claim emits a matching `claim_record`.
+
+## Continuous fee faucet (autonomous mode)
+
+`stockforge run` is a non-stop engine: each tick it finds the strongest stock
+narrative, launches (preferring stock-paired on Robinhood Chain), routes creator
+fees to one **treasury** address, and periodically claims those fees. It turns
+attention into a continuous fee stream — within hard limits.
+
+Two `.env` switches control how hands-off it runs (both default to safe):
+
+| Flag | Safe default | Faucet mode | Effect |
+|---|---|---|---|
+| `STOCKFORGE_DRY_RUN` | `true` | `false` | `false` = real broadcasts |
+| `STOCKFORGE_REQUIRE_APPROVAL` | `true` | `false` | `false` = **autonomous**, no Telegram tap |
+
+Fee routing / claiming:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `STOCKFORGE_TREASURY_ADDRESS` | = beneficiary | single fee recipient + claim destination |
+| `STOCKFORGE_AUTO_CLAIM` | `true` | sweeps auto-claim once above the threshold |
+| `STOCKFORGE_FEE_CLAIM_MIN_WETH` | `0.001` | skip dust claims (save gas) |
+| `STOCKFORGE_FEE_SWEEP_EVERY_TICKS` | `6` | sweep cadence |
+
+**Always-on rails even in autonomous mode:** daily budget (`STOCKFORGE_DAILY_LAUNCH_BUDGET`),
+Bankr's 1-launch/minute + 50/100-day caps, the circuit breaker, and the `/pause`
+Telegram kill switch. Autonomous on-chain claiming needs `BANKR_PRIVATE_KEY` (a
+minimally-funded hot wallet); without it, claims are built as unsigned txs to sign.
+
+> Going autonomous is opt-in and deliberate. Do the full
+> [Path to First Live Launch](#path-to-first-live-launch) in dry-run first, then
+> flip `STOCKFORGE_REQUIRE_APPROVAL=false` with a small budget.
 
 ## Deploy (Zeabur / Docker)
 
@@ -171,7 +203,7 @@ docker compose up --build          # local
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 48 tests: ratelimit, anti-slop, circuit, dry-run, forge, news signal
+pytest -q          # 58 tests: ratelimit, anti-slop, circuit, dry-run, forge, news, treasury/claims
 ruff check src tests
 ```
 

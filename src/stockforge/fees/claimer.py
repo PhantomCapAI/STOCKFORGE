@@ -45,16 +45,17 @@ class FeeClaimer:
         return self._client
 
     async def build_unsigned(self, token_addresses: list[str]) -> ClaimOutcome:
-        """Build unsigned claim txs (no private key required). Up to 50 tokens."""
-        beneficiary = self.settings.bankr_beneficiary_address
-        if not beneficiary:
-            return ClaimOutcome(False, "build-claim", "BANKR_BENEFICIARY_ADDRESS not set")
+        """Build unsigned claim txs (no private key required). Up to 50 tokens.
+        Fees are claimed to the treasury (== beneficiary unless overridden)."""
+        treasury = self.settings.treasury
+        if not treasury:
+            return ClaimOutcome(False, "build-claim", "no treasury/BANKR_BENEFICIARY_ADDRESS set")
         url = f"{self.settings.bankr_api_base}/public/doppler/build-claim"
         try:
             r = await self.client.post(
                 url,
                 json={
-                    "beneficiaryAddress": beneficiary,
+                    "beneficiaryAddress": treasury,
                     "tokenAddresses": token_addresses[:50],
                 },
             )

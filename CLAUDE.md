@@ -116,6 +116,35 @@ appear — the only address included is the public beneficiary/fee recipient.
 8. For stock-pairing specifically: `BANKR_BACKEND=rest` and `chain=robinhood`;
    confirm one launch reports `pair_status=accepted` before trusting it.
 
+## Continuous fee-faucet operation
+
+`stockforge run` is the continuous engine. Each tick it finds the strongest
+narrative, forges a concept, launches (gated), routes creator fees to the
+**treasury**, and periodically sweeps + claims fees. Two `.env` switches set how
+autonomous it is — both default safe:
+
+- `STOCKFORGE_REQUIRE_APPROVAL` — `true` = Telegram tap per real launch/claim;
+  `false` = **autonomous** (no tap). `Settings.autonomous` is true only when
+  approval is off AND dry-run is off. Autonomy never bypasses the daily budget,
+  the 1/min rate limit, the circuit breaker, or the `/pause` kill switch.
+- `STOCKFORGE_AUTO_CLAIM` (default true) — sweeps auto-claim once claimable
+  ≥ `STOCKFORGE_FEE_CLAIM_MIN_WETH`. Autonomous on-chain claiming needs
+  `BANKR_PRIVATE_KEY`; without it, claims are built UNSIGNED for a human to sign.
+
+**Treasury.** `STOCKFORGE_TREASURY_ADDRESS` (defaults to
+`BANKR_BENEFICIARY_ADDRESS`) is the single fee recipient + claim destination
+(`Settings.treasury`). Both launch fee routing and claims use it.
+
+**Observability.** Every launch → secret-free `launch_record`; every claim →
+secret-free `claim_record` (both JSON to stdout + persisted: `launches`/`claims`
+tables). Per-tick heartbeat logs budget remaining, circuit state, and mode.
+
+**Intended expansion path** (documented in OVERVIEW.md — do not over-build):
+1. Continuous stock-paired launches (current single engine).
+2. Fee consolidation into one treasury (current).
+3. Later: multiple agent wallets + x402 surfaces — additive (more
+   launchers/beneficiaries), not a rewrite. Not built yet.
+
 ## Hard rules (safety > features)
 
 1. **Dry-run is the default.** `STOCKFORGE_DRY_RUN=true` means nothing broadcasts.
@@ -123,8 +152,10 @@ appear — the only address included is the public beneficiary/fee recipient.
    `--simulate`. Never remove this guard.
 2. **Secrets only in `.env`.** No keys in code, logs, commits, or PRs. Use
    `Settings.redacted()` for any config you log. `.env` is gitignored.
-3. **Human-in-the-loop for money.** Real launches and claims require Telegram
-   approval. No Telegram configured ⇒ **fail-closed** (deny).
+3. **Human-in-the-loop is the default, autonomy is opt-in.** Real launches and
+   claims require Telegram approval unless `STOCKFORGE_REQUIRE_APPROVAL=false` is
+   deliberately set. No Telegram configured + approval required ⇒ **fail-closed**
+   (deny). The `/pause` kill switch must always work — never remove it.
 4. **Respect Bankr limits.** All launch attempts go through `LaunchRateLimiter`
    (counts failures, enforces 1/min + daily cap). Don't bypass it.
 5. **Circuit breaker.** 3 consecutive Bankr failures opens it for 5 min. Don't
@@ -146,7 +177,9 @@ appear — the only address included is the public beneficiary/fee recipient.
 | Tune anti-slop | `forge/antislop.py` |
 | Wire a structured Bankr deploy route | `launcher/bankr_rest.py` + `launcher/base.py` |
 | Add a Telegram command | `orchestrator/loop.py::_register_commands` |
-| Change launch policy | `.env` (`STOCKFORGE_*`) — no code change |
+| Change launch/faucet policy | `.env` (`STOCKFORGE_*`) — no code change |
+| Route fees / set treasury | `.env` `STOCKFORGE_TREASURY_ADDRESS` (defaults to beneficiary) |
+| Go autonomous (no taps) | `.env` `STOCKFORGE_REQUIRE_APPROVAL=false` (still gated by budget/rate/dry-run) |
 
 ## Run / test
 
