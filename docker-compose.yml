@@ -1,0 +1,14 @@
+services:
+  stockforge:
+    build: .
+    image: phantom/stockforge:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      STOCKFORGE_DB_PATH: /data/stockforge.sqlite
+    volumes:
+      - stockforge_data:/data
+    # No inbound ports required; the control plane is Telegram long-poll (outbound).
+
+volumes:
+  stockforge_data:
