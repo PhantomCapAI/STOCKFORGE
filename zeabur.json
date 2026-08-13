@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.zeabur.app/template.json",
+  "name": "phantom-stockforge",
+  "description": "Autonomous stock-narrative token launcher + fee claimer on Bankr",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "services": {
+    "stockforge": {
+      "start": "python -m stockforge.cli run",
+      "volumes": [{ "id": "data", "dir": "/data" }],
+      "env": {
+        "STOCKFORGE_DRY_RUN": { "default": "true" },
+        "STOCKFORGE_REQUIRE_APPROVAL": { "default": "true" },
+        "STOCKFORGE_DB_PATH": { "default": "/data/stockforge.sqlite" },
+        "BANKR_BACKEND": { "default": "rest" },
+        "BANKR_API_BASE": { "default": "https://api.bankr.bot" }
+      }
+    }
+  }
+}

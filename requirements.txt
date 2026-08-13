@@ -1,0 +1,10 @@
+# Runtime deps (mirror of pyproject [project.dependencies]).
+# Install: pip install -r requirements.txt
+httpx>=0.27
+aiosqlite>=0.20
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+tenacity>=8.4
+
+# Dev (optional): pip install -r requirements-dev.txt

@@ -1,0 +1,569 @@
+"""Command-line entrypoint.
+
+  stockforge run                 # start the autonomous loop (default)
+  stockforge status              # print config + today's launch budget
+  stockforge preview NVDA        # forge a concept for a ticker and preview the
+                                 # exact Bankr request WITHOUT launching
+  stockforge selfcheck [NVDA]    # run a full DRY-RUN pipeline end to end
+  stockforge launch NVDA         # one controlled launch (respects dry-run + approval)
+  stockforge promo NVDA          # full launch copy package (draft; nothing posted)
+  stockforge fees <0xtoken>      # read fees for a token (public, no auth)
+  stockforge confirm-pair <tok>  # mark a stock-pairing manually verified
+  stockforge treasury            # extracted fees + fees->compute funding status
+  stockforge doctor              # environment / readiness check (fail-closed)
+  stockforge preflight           # pre-live readiness checklist (fail-closed)
+
+Also runnable as `python -m stockforge.cli ...`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+
+from .config import get_settings
+from .logging import get_logger, setup_logging
+from .models import Signal
+
+log = get_logger("cli")
+
+
+def main(argv: list[str] | None = None) -> int:
+    # The CLI prints status glyphs (✅ ⚠️ ❌). On Windows the console defaults to
+    # a legacy codepage (cp1252) that can't encode them, which crashes every
+    # command with UnicodeEncodeError. Force UTF-8 on the standard streams.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+    settings = get_settings()
+    setup_logging(settings.log_level)
+
+    parser = argparse.ArgumentParser(prog="stockforge", description="Phantom StockForge")
+    sub = parser.add_subparsers(dest="cmd")
+    sub.add_parser("run", help="start the autonomous orchestrator loop")
+    sub.add_parser("status", help="print config + launch budget")
+    sub.add_parser("doctor", help="check environment readiness (fail-closed)")
+    sub.add_parser("preflight", help="pre-live readiness checklist (fail-closed)")
+    sub.add_parser("treasury", help="show extracted fees + compute-funding status")
+    _MODES = ["auto", "stock", "stock_paired", "standard"]
+    p_prev = sub.add_parser("preview", help="forge + preview a launch (no broadcast)")
+    p_prev.add_argument("ticker")
+    p_prev.add_argument("--chain", default=None, choices=["base", "robinhood"])
+    p_prev.add_argument("--mode", default=None, choices=_MODES, help="auto | stock | standard")
+    p_launch = sub.add_parser(
+        "launch", help="controlled SINGLE launch (respects dry-run + approval)"
+    )
+    p_launch.add_argument("ticker")
+    p_launch.add_argument("--chain", default=None, choices=["base", "robinhood"])
+    p_launch.add_argument("--mode", default=None, choices=_MODES, help="auto | stock | standard")
+    p_promo = sub.add_parser("promo", help="generate a full launch copy package (no launch, no post)")
+    p_promo.add_argument("ticker")
+    p_self = sub.add_parser("selfcheck", help="run a full dry-run pipeline end to end")
+    p_self.add_argument("ticker", nargs="?", default="NVDA")
+    p_self.add_argument("--chain", default=None, choices=["base", "robinhood"])
+    p_self.add_argument(
+        "--live-approval",
+        action="store_true",
+        help="actually send a Telegram approval prompt and wait (bounded) to verify buttons",
+    )
+    p_fees = sub.add_parser("fees", help="read fees for a token address")
+    p_fees.add_argument("token")
+    p_cp = sub.add_parser("confirm-pair", help="mark a launch's stock-pairing manually verified")
+    p_cp.add_argument("token")
+    p_cp.add_argument("--note", default="")
+
+    args = parser.parse_args(argv)
+    cmd = args.cmd or "run"
+
+    try:
+        if cmd == "run":
+            return asyncio.run(_run())
+        if cmd == "status":
+            return asyncio.run(_status())
+        if cmd == "doctor":
+            return asyncio.run(_doctor())
+        if cmd == "preflight":
+            return asyncio.run(_preflight())
+        if cmd == "treasury":
+            return asyncio.run(_treasury())
+        if cmd == "preview":
+            return asyncio.run(_preview(args.ticker, args.chain, args.mode))
+        if cmd == "launch":
+            return asyncio.run(_launch_once(args.ticker, args.chain, args.mode))
+        if cmd == "promo":
+            return asyncio.run(_promo(args.ticker))
+        if cmd == "selfcheck":
+            return asyncio.run(_selfcheck(args.ticker, args.chain, args.live_approval))
+        if cmd == "fees":
+            return asyncio.run(_fees(args.token))
+        if cmd == "confirm-pair":
+            return asyncio.run(_confirm_pair(args.token, args.note))
+    except KeyboardInterrupt:
+        log.info("interrupted")
+        return 130
+    parser.print_help()
+    return 1
+
+
+async def _run() -> int:
+    from .orchestrator import Orchestrator
+
+    orch = Orchestrator(get_settings())
+    await orch.start()
+    return 0
+
+
+async def _status() -> int:
+    from .db import Store
+
+    settings = get_settings()
+    store = Store(settings.db_path)
+    await store.connect()
+    used = await store.get_daily_counter("launch_attempts")
+    await store.close()
+    cfg = settings.redacted()
+    print("== StockForge status ==")
+    for k, v in cfg.items():
+        print(f"  {k:22} {v}")
+    print(f"  launches_today         {used}")
+    return 0
+
+
+def _quiet_logs() -> None:
+    """Silence incidental INFO logs (e.g. DB 'state store ready') so the read-only
+    checklist output stays clean. The checks print their own status lines."""
+    import logging
+
+    logging.getLogger("stockforge").setLevel(logging.WARNING)
+
+
+_BAR = "  " + "─" * 54
+
+
+async def _doctor() -> int:
+    from .health import run_doctor
+
+    _quiet_logs()
+    settings = get_settings()
+    print("== StockForge doctor ==")
+    print(f"  backend={settings.bankr_backend} chain={settings.default_chain} "
+          f"dry_run={settings.dry_run} require_approval={settings.require_approval}")
+    checks, ok = await run_doctor(settings)
+    for c in checks:
+        print(c.render())
+    print(_BAR)
+    if ok:
+        print("  RESULT:  ✅ READY (no hard failures)")
+    else:
+        print("  RESULT:  ❌ NOT READY — resolve the ❌ items above before running live")
+    print(_BAR)
+    return 0 if ok else 1
+
+
+async def _treasury() -> int:
+    """Extraction view: fees claimed (local audit trail + Bankr's own totals) and
+    how compute funding is wired. Read-only, no secrets, no spend."""
+    from .compute import compute_funding_status
+    from .db import Store
+    from .fees import FeeReader
+
+    _quiet_logs()
+    settings = get_settings()
+    print("== StockForge treasury / extraction ==")
+    print(f"  treasury address : {settings.treasury or 'UNSET (set STOCKFORGE_TREASURY_ADDRESS or beneficiary)'}")
+    print(f"  auto_claim       : {settings.auto_claim}   min_claim_weth={settings.fee_claim_min_weth}")
+
+    from .wallets import WalletPool
+
+    store = Store(settings.db_path)
+    await store.connect()
+    summary = await store.claim_summary()
+    by_wallet = await store.launch_counts_by_wallet()
+    kinds = await store.launch_kind_counts()
+    per_token = await store.per_token_latest_fees()
+    recent = await store.recent_claims(5)
+    token_map = await store.token_recipients()
+    confirmed = await store.pair_confirmed_map()
+    await store.close()
+
+    # === CAPITAL HEADER — the numbers that matter, at a glance ===============
+    claimable_now = sum(t["claimable_weth"] for t in per_token)
+    n_conf = sum(1 for v in confirmed.values() if v["confirmed"])
+    total_launched = sum(by_wallet.values())
+    print(f"  ┌{'─'*52}")
+    print(f"  │ 💰 CAPITAL PULLED (claimed) : {summary['weth_claimed_recorded']:.6f} WETH")
+    print(f"  │ 💧 CLAIMABLE NOW (pending)  : {claimable_now:.6f} WETH")
+    print(f"  │ 🚀 launches={total_launched}  claims_ok={summary['claim_successes']}/{summary['claim_attempts']}"
+          f"  ✅pairs={n_conf}")
+    print(f"  │ 🧩 by kind: stock-paired={kinds['stock_paired']}  standard={kinds['standard']}")
+    print(f"  └{'─'*52}")
+
+    # Wallet pool (one honest operation) + per-wallet launch attribution.
+    pool = WalletPool.from_settings(settings)
+    print("  -- wallets (one operation) --")
+    for w in pool.redacted():
+        print(f"  {w['id']:12} fees->{w['fee_recipient']}  launched={by_wallet.get(w['id'], 0)}")
+
+    # Producing tokens: highest claimable first (where the fees actually are).
+    if per_token:
+        producing = sorted(per_token, key=lambda t: t["claimable_weth"], reverse=True)
+        print("  -- top producing tokens (by claimable) --")
+        for t in producing[:8]:
+            mark = "✅pair" if confirmed.get(t["token"], {}).get("confirmed") else "     "
+            print(f"  {mark} {t['token'][:16]}… claimable={t['claimable_weth']} claimed={t['claimed_weth']}")
+
+    # Stock-pair verification: which launched tokens still need manual confirming.
+    paired = {tok: m for tok, m in token_map.items() if m.get("ticker")}
+    if paired:
+        unconfirmed = [t for t in paired if not confirmed.get(t, {}).get("confirmed")]
+        print("  -- stock-pair verification --")
+        print(f"  confirmed: {sum(1 for v in confirmed.values() if v['confirmed'])}  "
+              f"pending: {len(unconfirmed)}")
+        for t in unconfirmed[:5]:
+            print(f"    ⏳ {t[:16]}… ({paired[t]['ticker']}) — confirm: stockforge confirm-pair {t}")
+
+    if recent:
+        print("  -- recent extraction activity --")
+        for r in recent:
+            print(f"  {r.get('timestamp','')[:19]} [{r.get('wallet_id','?')}/{r.get('mode','?')}] "
+                  f"{r.get('claimable_weth',0):.6f} WETH ok={r.get('ok')}")
+
+    if settings.treasury:
+        try:
+            async with FeeReader(settings.bankr_api_base) as reader:
+                totals = await reader.creator_totals(settings.treasury)
+            print("  -- Bankr creator-fees (authoritative) --")
+            if totals:
+                print(f"  lifetime WETH    : {totals.get('lifetime_weth', 0)}")
+                print(f"  claimable WETH   : {totals.get('claimable_weth', 0)}")
+                print(f"  claimed WETH     : {totals.get('claimed_weth', 0)}")
+                print(f"  tokens           : {totals.get('token_count', 0)}")
+            else:
+                print("  (no data / endpoint unreachable from here)")
+        except Exception as e:  # noqa: BLE001
+            print(f"  (creator-fees read failed: {e})")
+
+    cf = compute_funding_status(settings)
+    print("  -- fees -> compute (Bankr LLM Gateway) --")
+    print(f"  loop        : {cf['loop']}")
+    print(f"  llm_gateway : {cf['llm_gateway']}")
+    print(f"  top up      : {cf['commands']['top_up']}  |  auto: {cf['commands']['auto_top_up']}")
+    return 0
+
+
+async def _promo(ticker: str) -> int:
+    """Generate a full launch copy package for a ticker — tweet, narrative,
+    hashtags, and follow-up drafts. Forges a concept only; NOTHING is launched or
+    posted. Lets the operator grab ready-to-post copy fast."""
+    from .forge import ConceptForge
+    from .models import LaunchResult, LaunchStatus, Signal
+    from .promo import Promoter
+    from .signal import AttentionScorer
+
+    _quiet_logs()
+    settings = get_settings()
+    ticker = ticker.upper()
+    scorer = AttentionScorer()
+    sig = scorer.enrich(
+        Signal(ticker=ticker, headline=f"{ticker} manual promo", sources=["cli"], meta={"magnitude": 20})
+    )
+    forge = ConceptForge(settings)
+    concept = await forge.forge(sig, recent_slugs=[])
+    await forge.aclose()
+    if concept is None:
+        print("concept rejected by anti-slop; try again")
+        return 1
+    # Empty result (no launch) — copy is pre-launch; CA/link fill in after a real launch.
+    result = LaunchResult(request_id="preview", status=LaunchStatus.SIMULATED)
+    kit = Promoter(link_base=settings.promo_link_base).build_kit(concept, result)
+    print(f"== Launch copy package — ${concept.symbol} ({ticker}) ==\n")
+    print(kit.render_full())
+    print("\n(Review + post manually. Nothing was launched or posted.)")
+    return 0
+
+
+async def _confirm_pair(token: str, note: str) -> int:
+    """Operator confirms a launch's pool is really quoted in the stock — closes the
+    UNVERIFIED gap for that token after a manual check on Bankr."""
+    from .db import Store
+
+    _quiet_logs()
+    settings = get_settings()
+    store = Store(settings.db_path)
+    await store.connect()
+    tmap = await store.token_recipients()
+    ticker = tmap.get(token, {}).get("ticker", "")
+    await store.confirm_pair(token, ticker, note)
+    await store.close()
+    print(f"✅ stock-pair confirmed for {token} ({ticker or 'unknown ticker'})"
+          + (f" — {note}" if note else ""))
+    return 0
+
+
+async def _preflight() -> int:
+    from .health import run_preflight
+
+    _quiet_logs()
+    settings = get_settings()
+    print("== StockForge preflight — are you ready to turn dry-run OFF? ==")
+    print(f"  backend={settings.bankr_backend} chain={settings.default_chain} "
+          f"dry_run={settings.dry_run} require_approval={settings.require_approval}\n")
+    checks, ready = await run_preflight(settings)
+    for i, c in enumerate(checks, 1):
+        print(f"  {i:>2}. {c.render().strip()}")
+    print(f"\n{_BAR}")
+    if ready:
+        print("  RESULT:  ✅ READY FOR LIVE")
+        print(_BAR)
+        print("  Still required MANUALLY before flipping dry-run off:")
+        print("    • verify ONE stock-paired launch on Bankr yourself (pair_status)")
+        print("    • set STOCKFORGE_DAILY_LAUNCH_BUDGET=1")
+    else:
+        print("  RESULT:  ⛔ NOT READY FOR LIVE")
+        print(_BAR)
+        print("  Resolve every ⚠️/❌ item above. Dry-run stays ON until all are green.")
+        print("  This is by design — fail-closed.")
+    return 0 if ready else 1
+
+
+def _norm_mode(mode: str | None) -> str | None:
+    """Map the CLI 'stock' alias to the internal 'stock_paired' mode."""
+    if mode is None:
+        return None
+    return "stock_paired" if mode == "stock" else mode
+
+
+async def _launch_once(ticker: str, chain: str | None, mode: str | None = None) -> int:
+    """Controlled single launch. Respects dry-run (default) and, when live,
+    Telegram approval. Logs the exact prompt and records the pair outcome."""
+    from .models import Signal
+    from .orchestrator import Orchestrator
+    from .signal import AttentionScorer
+
+    settings = get_settings()
+    if chain:
+        settings.default_chain = chain
+    mode = _norm_mode(mode)
+    ticker = ticker.upper()
+    run_mode = "DRY-RUN (nothing broadcasts)" if settings.dry_run else "LIVE"
+    print(f"== Controlled single launch — {ticker} on {settings.default_chain} "
+          f"[mode={mode or settings.launch_mode}, {run_mode}] ==")
+
+    orch = Orchestrator(settings)
+    await orch.store.connect()
+    try:
+        scorer = AttentionScorer()
+        sig = scorer.enrich(
+            Signal(
+                ticker=ticker,
+                headline=f"{ticker} manual single launch",
+                sources=["cli", "operator"],
+                meta={"magnitude": 20},
+            )
+        )
+        recent = await orch.store.recent_concept_slugs()
+        concept = await orch.forge.forge(sig, recent_slugs=recent)
+        if concept is None:
+            print("❌ concept rejected by anti-slop; nothing launched.")
+            return 1
+        await orch.store.save_concept(concept)
+        print(f"  concept: ${concept.symbol} '{concept.name}'")
+
+        # For a LIVE launch that needs approval, run the Telegram poller so the
+        # Approve/Reject buttons actually resolve.
+        poller = None
+        if not settings.dry_run and settings.require_approval and orch.tg.enabled:
+            print("  waiting for Telegram approval (tap Approve/Reject)…")
+            poller = asyncio.create_task(orch.tg.run())
+        try:
+            result = await orch.gated_launch(concept, mode=mode)
+        finally:
+            if poller is not None:
+                await orch.tg.stop()
+                poller.cancel()
+
+        if result is None:
+            print("  ⛔ not launched (rate-limited, or approval denied/unavailable). See logs.")
+            return 1
+        print(f"  status={result.status.value}  pair={result.pair_status.value}"
+              f"  (requested={result.pair_requested or 'none'})")
+        if result.token_address:
+            print(f"  token: {result.token_address}")
+        if result.error:
+            print(f"  error: {result.error}")
+        return 0
+    finally:
+        await orch.forge.aclose()
+        await orch.claimer.aclose()
+        await orch.store.close()
+
+
+async def _selfcheck(ticker: str, chain: str | None, live_approval: bool) -> int:
+    """Exercise the whole pipeline in DRY-RUN so a human can verify it end to end
+    without spending a real launch: signal -> concept -> launch(dry) -> fee check
+    -> approval flow. Refuses to run if dry-run is somehow off."""
+    from .fees import FeeReader
+    from .forge import ConceptForge
+    from .launcher import BankrLauncher
+    from .models import Approval, ApprovalKind, LaunchRequest
+    from .orchestrator.telegram import TelegramControl
+    from .signal import AttentionScorer
+
+    settings = get_settings()
+    if not settings.dry_run:
+        print("❌ selfcheck refuses to run with STOCKFORGE_DRY_RUN=false (it must stay a dry run).")
+        return 1
+    chain = chain or settings.default_chain
+    ticker = ticker.upper()
+    print(f"== StockForge selfcheck (DRY-RUN) — {ticker} on {chain} ==\n")
+
+    # 1) Signal
+    scorer = AttentionScorer()
+    sig = scorer.enrich(
+        Signal(
+            ticker=ticker,
+            headline=f"{ticker} squeeze rally record earnings",
+            sources=["selfcheck", "manual", "news"],
+            meta={"magnitude": 18},
+        )
+    )
+    print(f"[1/5] signal      score={sig.attention_score:.0f}/100 "
+          f"(gate={settings.min_attention_score}) -> {'ELIGIBLE' if sig.attention_score >= settings.min_attention_score else 'below gate'}")
+
+    # 2) Concept
+    forge = ConceptForge(settings)
+    concept = await forge.forge(sig, recent_slugs=[])
+    await forge.aclose()
+    if concept is None:
+        print("[2/5] concept     ❌ rejected by anti-slop")
+        return 1
+    print(f"[2/5] concept     ${concept.symbol} '{concept.name}' unique={concept.uniqueness_score:.2f}")
+
+    # 3) Launch (dry-run)
+    req = LaunchRequest(
+        concept_id=concept.id,
+        name=concept.name,
+        symbol=concept.symbol,
+        chain=chain,
+        fee_recipient=settings.bankr_beneficiary_address,
+        disable_vesting=settings.disable_vesting,
+        pair_with=concept.paired_ticker if chain == "robinhood" else "",
+    )
+    launcher = BankrLauncher(settings)
+    preview = launcher.preview(req)
+    print(f"[3/5] launch      prompt: {preview['prompt']}")
+    result = await launcher.launch(req)
+    print(f"                  status={result.status.value} pair={result.pair_status.value} "
+          f"(requested={result.pair_requested or 'none'})")
+    if result.status.value not in ("simulated",):
+        print("                  ⚠️  expected a SIMULATED result in dry-run")
+
+    # 4) Fee check (dry — read-only public endpoint if we have a beneficiary)
+    if settings.bankr_beneficiary_address:
+        try:
+            async with FeeReader(settings.bankr_api_base) as reader:
+                totals = await reader.creator_totals(settings.bankr_beneficiary_address)
+            print(f"[4/5] fee check   creator totals: {totals or 'no data / unreachable'}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[4/5] fee check   skipped (reader error: {e})")
+    else:
+        print("[4/5] fee check   skipped (no BANKR_BENEFICIARY_ADDRESS)")
+
+    # 5) Approval flow
+    summary = (
+        f"[SELFCHECK] LAUNCH ${req.symbol} on {chain} pair={preview['pair_with']} "
+        f"(dry-run — nothing broadcasts)"
+    )
+    approval = Approval(kind=ApprovalKind.LAUNCH, ref_id=req.id, summary=summary)
+    tg = TelegramControl(settings.telegram_bot_token, settings.telegram_chat_id, approval_timeout=60.0)
+    if live_approval and tg.enabled:
+        print("[5/5] approval    sending a live Telegram approval (60s)… tap a button to verify")
+        # Need the inbound poller running to receive the button tap.
+        poller = asyncio.create_task(tg.run())
+        try:
+            decided = await tg.request_approval(approval.id, summary)
+            print(f"                  operator decision: {'APPROVED' if decided else 'REJECTED/timeout'}")
+        finally:
+            await tg.stop()
+            poller.cancel()
+    else:
+        gate = "ENABLED" if tg.enabled else "DISABLED (fail-closed → auto-deny)"
+        print(f"[5/5] approval    Telegram {gate}; would prompt:\n                  {summary}")
+        if not tg.enabled:
+            print("                  (a real launch here would be DENIED — no approver reachable)")
+
+    print("\n✅ selfcheck complete — dry-run only, no launches spent.")
+    return 0
+
+
+async def _preview(ticker: str, chain: str | None, mode: str | None = None) -> int:
+    from .forge import ConceptForge
+    from .launcher import BankrLauncher
+    from .launcher.pairing import resolve_pair_with
+    from .models import LaunchRequest
+    from .signal import AttentionScorer
+
+    settings = get_settings()
+    mode = _norm_mode(mode) or settings.launch_mode
+    scorer = AttentionScorer()
+    sig = scorer.enrich(
+        Signal(ticker=ticker.upper(), headline=f"{ticker.upper()} manual preview", sources=["cli"], meta={"magnitude": 20})
+    )
+    forge = ConceptForge(settings)
+    concept = await forge.forge(sig, recent_slugs=[])
+    await forge.aclose()
+    if concept is None:
+        print("concept rejected by anti-slop; try again")
+        return 1
+    chain = chain or settings.default_chain
+    is_stock = concept.paired_ticker.upper() in {t.upper() for t in settings.watchlist}
+    pair_with, note = resolve_pair_with(mode, concept.paired_ticker, chain, is_stock)
+    req = LaunchRequest(
+        concept_id=concept.id,
+        name=concept.name,
+        symbol=concept.symbol,
+        chain=chain,
+        launch_mode=mode,
+        fee_recipient=settings.bankr_beneficiary_address,
+        disable_vesting=settings.disable_vesting,
+        pair_with=pair_with,
+    )
+    preview = BankrLauncher(settings).preview(req)
+    print(f"== Concept for {ticker.upper()} (attention {sig.attention_score:.0f}/100) ==")
+    print(f"  name    : {concept.name}")
+    print(f"  symbol  : ${concept.symbol}")
+    print(f"  unique  : {concept.uniqueness_score:.2f}")
+    print(f"  thesis  : {concept.thesis}")
+    print(f"  tweet   : {concept.launch_tweet}")
+    print(f"== Launch request (NOT sent) — mode={mode}, {'STOCK-PAIRED' if pair_with else 'STANDARD'} ({note}) ==")
+    for k, v in preview.items():
+        print(f"  {k:10}: {v}")
+    return 0
+
+
+async def _fees(token: str) -> int:
+    from .fees import FeeReader
+
+    settings = get_settings()
+    async with FeeReader(settings.bankr_api_base) as reader:
+        snap = await reader.token_fees(token)
+        print(f"== Fees for {token} ==")
+        print(f"  claimable WETH : {snap.claimable_weth}")
+        print(f"  claimable tok  : {snap.claimable_token}")
+        print(f"  lifetime WETH  : {snap.lifetime_weth}")
+        print(f"  pool_id        : {snap.pool_id}")
+        print(f"  initializer    : {snap.initializer}")
+        if settings.bankr_beneficiary_address:
+            c = await reader.claimable_for(token, settings.bankr_beneficiary_address)
+            print(f"  you can claim  : {c.claimable_weth} WETH / {c.claimable_token} tok")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
